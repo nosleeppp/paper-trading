@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-trading"
+version = "0.1.0"
+description = "实盘模拟系统 — QMT兼容策略接口 + 逐分钟撮合 + Web监控面板"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "nosleeppp", email = "nosleeppp@github.com"},
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "flask>=2.0",
+    "pandas>=1.3",
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "black>=23.0"]
+
+[project.scripts]
+paper-trading = "paper_trading.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/nosleeppp/paper-trading"
+Repository = "https://github.com/nosleeppp/paper-trading"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = {find = {where = ["src"]}}
+
+[tool.setuptools.package-data]
+paper_trading = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
