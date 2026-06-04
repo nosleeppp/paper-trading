@@ -13,8 +13,12 @@ DataProvider      : 数据提供者基类 (用户对接实时数据)
 QMT 兼容层
 ----------
 passorder()       : 下单函数 (签名与 QMT 一致)
+set_basket()      : 篮子定义函数
+order_algo()      : 算法交易函数 (TWAP/VWAP)
 OP_BUY / OP_SELL  : 买卖方向常量
+OP_BUY_BASKET / OP_SELL_BASKET : 篮子买卖常量
 ORDER_LIMIT / ORDER_MARKET : 订单类型常量
+ORDER_BASKET_BY_QTY/BY_AMOUNT/BY_RATIO : 篮子下单方式
 
 快速开始
 --------
@@ -33,8 +37,13 @@ from paper_trading.engine import PaperEngine
 from paper_trading.broker import PaperBroker, BrokerConfig
 from paper_trading.data_provider import DataProvider
 from paper_trading.qmt_compat import (
-    Context, passorder, PositionInfo, OrderInfo, TickData,
-    OP_BUY, OP_SELL, ORDER_LIMIT, ORDER_MARKET,
+    Context, passorder, set_basket, order_algo,
+    PositionInfo, OrderInfo, TickData,
+    Basket, BasketStock, BasketOrder, AlgoOrder,
+    OP_BUY, OP_SELL, OP_BUY_BASKET, OP_SELL_BASKET,
+    ORDER_LIMIT, ORDER_MARKET,
+    ORDER_BASKET_BY_QTY, ORDER_BASKET_BY_AMOUNT, ORDER_BASKET_BY_RATIO,
+    PRICE_SELL1, PRICE_LATEST, PRICE_BUY1, PRICE_SPECIFIED,
 )
 
 __all__ = [
@@ -44,7 +53,13 @@ __all__ = [
     'Context',
     'DataProvider',
     'passorder',
-    'OP_BUY', 'OP_SELL', 'ORDER_LIMIT', 'ORDER_MARKET',
+    'set_basket',
+    'order_algo',
+    'OP_BUY', 'OP_SELL', 'OP_BUY_BASKET', 'OP_SELL_BASKET',
+    'ORDER_LIMIT', 'ORDER_MARKET',
+    'ORDER_BASKET_BY_QTY', 'ORDER_BASKET_BY_AMOUNT', 'ORDER_BASKET_BY_RATIO',
+    'PRICE_SELL1', 'PRICE_LATEST', 'PRICE_BUY1', 'PRICE_SPECIFIED',
     'PositionInfo', 'OrderInfo', 'TickData',
+    'Basket', 'BasketStock', 'BasketOrder', 'AlgoOrder',
     '__version__',
 ]

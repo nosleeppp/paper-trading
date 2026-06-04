@@ -19,8 +19,12 @@ from typing import Dict, List, Optional, Any
 import logging
 
 from paper_trading.qmt_compat import (
-    OP_BUY, OP_SELL, ORDER_LIMIT, ORDER_MARKET,
+    OP_BUY, OP_SELL, OP_BUY_BASKET, OP_SELL_BASKET,
+    ORDER_LIMIT, ORDER_MARKET,
+    ORDER_BASKET_BY_QTY, ORDER_BASKET_BY_AMOUNT, ORDER_BASKET_BY_RATIO,
+    PRICE_SELL1, PRICE_LATEST, PRICE_BUY1, PRICE_SPECIFIED,
     PositionInfo, OrderInfo, TickData,
+    Basket, BasketOrder, AlgoOrder,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,14 @@ class PaperBroker:
 
         # 订单 ID 计数器
         self._order_id: int = 1000
+
+        # 篮子订单跟踪
+        self._basket_orders: Dict[int, BasketOrder] = {}
+        self._basket_order_id: int = 5000
+
+        # 算法订单跟踪
+        self._algo_orders: Dict[int, AlgoOrder] = {}
+        self._algo_order_id: int = 6000
 
         # 当前日期
         self.current_date: str = ''
@@ -311,3 +323,314 @@ class PaperBroker:
         if increment == 1:
             return qty
         return (qty // increment) * increment
+
+    # ── 篮子交易 ──────────────────────────────────────────
+
+    def submit_basket_order(
+        self,
+        op_type: int,
+        order_type: int,
+        basket_name: str,
+        volume: float,
+        pr_type: int = PRICE_LATEST,
+        strategy_name: str = '',
+        user_order_id: int = 0,
+        baskets: dict = None,
+    ) -> int:
+        """
+        提交篮子订单。
+
+        返回 basket_order_id（0 = 失败）。
+        """
+        baskets = baskets or {}
+        basket = baskets.get(basket_name)
+        if basket is None:
+            logger.warning("[Broker] 篮子 '%s' 未定义", basket_name)
+            return 0
+
+        # 展开篮子：根据 order_type 计算每只股票的分配
+        items = self._expand_basket(basket, op_type, order_type, volume, pr_type)
+        if not items:
+            logger.warning("[Broker] 篮子 '%s' 展开后无有效标的", basket_name)
+            return 0
+
+        # 创建 BasketOrder 记录
+        self._basket_order_id += 1
+        bid = self._basket_order_id
+
+        bo = BasketOrder(
+            basket_id=bid,
+            basket_name=basket_name,
+            op_type=op_type,
+            order_type=order_type,
+            volume=volume,
+            status='pending',
+            total_child_count=len(items),
+            create_time=self.current_time,
+            strategy_name=strategy_name,
+        )
+
+        # 确定子订单方向
+        child_side = OP_SELL if op_type == OP_SELL_BASKET else OP_BUY
+
+        # 逐股下单
+        for stockcode, qty, exec_price in items:
+            child_id = self.submit_order(
+                op_type=child_side,
+                order_type=ORDER_MARKET,
+                stockcode=stockcode,
+                quantity=qty,
+                price=exec_price,
+                strategy_name=strategy_name,
+            )
+            if child_id > 0:
+                bo.child_order_ids.append(child_id)
+
+        bo.filled_child_count = len(bo.child_order_ids)
+        bo.status = 'filled' if bo.filled_child_count == bo.total_child_count else 'partial'
+        bo.update_time = self.current_time
+
+        self._basket_orders[bid] = bo
+        logger.info(
+            "[Broker] 篮子 '%s' 下单: %d/%d 成交",
+            basket_name, bo.filled_child_count, bo.total_child_count,
+        )
+        return bid
+
+    def _expand_basket(
+        self, basket, op_type: int, order_type: int,
+        volume: float, pr_type: int,
+    ) -> list:
+        """
+        展开篮子为 (stockcode, qty, exec_price) 列表。
+        """
+        items = []
+
+        if order_type == ORDER_BASKET_BY_QTY:
+            # volume = 份数，乘以每份股数
+            lots = max(int(volume), 1)
+            for bs in basket.stocks:
+                tick = self._ticks.get(bs.stock)
+                price = self._resolve_price(tick, op_type, pr_type)
+                if price <= 0:
+                    continue
+                qty = bs.quantity * lots
+                min_unit = 200 if bs.stock.startswith('688') else 100
+                if qty >= min_unit:
+                    items.append((bs.stock, qty, price))
+
+        elif order_type == ORDER_BASKET_BY_AMOUNT:
+            # volume = 总金额（元），按权重分配
+            total_amount = float(volume)
+            for bs in basket.stocks:
+                tick = self._ticks.get(bs.stock)
+                price = self._resolve_price(tick, op_type, pr_type)
+                if price <= 0 or bs.weight <= 0:
+                    continue
+                alloc = total_amount * bs.weight
+                qty = int(alloc / price / 100) * 100
+                min_unit = 200 if bs.stock.startswith('688') else 100
+                if qty >= min_unit:
+                    items.append((bs.stock, qty, price))
+
+        elif order_type == ORDER_BASKET_BY_RATIO:
+            # volume = 0~1，按可用资金比例
+            total_amount = self.cash * float(volume)
+            for bs in basket.stocks:
+                tick = self._ticks.get(bs.stock)
+                price = self._resolve_price(tick, op_type, pr_type)
+                if price <= 0 or bs.weight <= 0:
+                    continue
+                alloc = total_amount * bs.weight
+                qty = int(alloc / price / 100) * 100
+                min_unit = 200 if bs.stock.startswith('688') else 100
+                if qty >= min_unit:
+                    items.append((bs.stock, qty, price))
+
+        # 买入时做资金约束裁剪
+        if op_type == OP_BUY_BASKET and items:
+            items = self._trim_basket_items(items, self.cash)
+
+        return items
+
+    @staticmethod
+    def _resolve_price(tick, op_type: int, pr_type: int) -> float:
+        """根据 pr_type 解析成交参考价。"""
+        if tick is None:
+            return 0.0
+        if pr_type == PRICE_BUY1:
+            return tick.bid1 or tick.last_price
+        elif pr_type == PRICE_SELL1:
+            return tick.ask1 or tick.last_price
+        elif pr_type == PRICE_LATEST:
+            return tick.last_price
+        elif pr_type == PRICE_SPECIFIED:
+            return tick.last_price  # 指定价由子订单限价处理
+        return tick.last_price
+
+    def _trim_basket_items(self, items: list, available_cash: float) -> list:
+        """按比例裁剪超出可用资金的篮子项目。"""
+        total_est = sum(qty * price for _, qty, price in items)
+        if total_est <= available_cash:
+            return items
+        scale = (available_cash * 0.98) / total_est
+        result = []
+        for code, qty, price in items:
+            new_qty = int(qty * scale / 100) * 100
+            min_unit = 200 if code.startswith('688') else 100
+            if new_qty >= min_unit:
+                result.append((code, new_qty, price))
+        return result
+
+    def get_basket_orders(self) -> list:
+        """获取所有篮子订单。"""
+        return list(self._basket_orders.values())
+
+    def get_algo_orders(self) -> list:
+        """获取所有算法订单。"""
+        return list(self._algo_orders.values())
+
+    # ── 算法交易 ──────────────────────────────────────────
+
+    def submit_algo_order(
+        self,
+        algo_type: str,
+        stockcode: str = '',
+        basket_name: str = '',
+        volume: int = 0,
+        duration_seconds: int = 600,
+        time_interval_seconds: int = 10,
+        strategy_name: str = '',
+        baskets: dict = None,
+        current_minute: int = 0,
+    ) -> int:
+        """
+        提交算法交易单（TWAP / VWAP）。
+
+        返回 algo_id（0 = 失败）。
+        """
+        if algo_type not in ('TWAP', 'VWAP'):
+            logger.warning("[Broker] 不支持的算法类型: %s", algo_type)
+            return 0
+
+        # 计算切片
+        duration_minutes = max(duration_seconds // 60, 1)
+        interval_minutes = max(time_interval_seconds // 60, 1)
+        slice_count = max(duration_minutes // interval_minutes, 1)
+        end_min = min(current_minute + duration_minutes, 239)
+
+        total_qty = volume
+        slice_qty = max(total_qty // slice_count, 100)
+
+        self._algo_order_id += 1
+        aid = self._algo_order_id
+
+        ao = AlgoOrder(
+            algo_id=aid,
+            algo_type=algo_type,
+            stockcode=stockcode,
+            basket_name=basket_name,
+            total_quantity=total_qty,
+            start_minute=current_minute,
+            end_minute=end_min,
+            slice_quantity=slice_qty,
+            slices_total=slice_count,
+            status='active',
+            create_time=self.current_time,
+            strategy_name=strategy_name,
+            params={
+                'duration_seconds': duration_seconds,
+                'time_interval_seconds': time_interval_seconds,
+                'volume': volume,
+            },
+        )
+
+        self._algo_orders[aid] = ao
+        logger.info(
+            "[Broker] %s 算法创建: id=%d, slices=%d×%d股, 分钟 %d→%d",
+            algo_type, aid, slice_count, slice_qty, current_minute, end_min,
+        )
+        return aid
+
+    def process_algo_orders(self, current_minute: int, baskets: dict = None):
+        """
+        处理所有活跃算法订单（引擎每分钟调用）。
+
+        执行当前分钟到期的切片。
+        """
+        baskets = baskets or {}
+
+        for aid, ao in list(self._algo_orders.items()):
+            if ao.status != 'active':
+                continue
+
+            # 已过结束时间：执行剩余全部
+            if current_minute > ao.end_minute:
+                remaining = ao.total_quantity - ao.executed_quantity
+                if remaining >= 100:
+                    self._execute_algo_slice(ao, remaining, baskets)
+                ao.status = 'completed'
+                continue
+
+            # 执行当前分钟切片
+            remaining = ao.total_quantity - ao.executed_quantity
+            if remaining <= 0:
+                ao.status = 'completed'
+                continue
+
+            slice_qty = min(ao.slice_quantity, remaining)
+            if slice_qty >= 100:
+                self._execute_algo_slice(ao, slice_qty, baskets)
+
+            if ao.executed_quantity >= ao.total_quantity:
+                ao.status = 'completed'
+
+    def _execute_algo_slice(self, ao: AlgoOrder, slice_qty: int, baskets: dict):
+        """执行算法订单的一个切片。"""
+        baskets = baskets or {}
+
+        if ao.basket_name:
+            # 篮子 algo：按权重拆分到篮子各股
+            basket = baskets.get(ao.basket_name)
+            if basket is None:
+                return
+            total_weight = sum(bs.weight for bs in basket.stocks)
+            if total_weight <= 0:
+                return
+            for bs in basket.stocks:
+                if bs.weight <= 0:
+                    continue
+                tick = self._ticks.get(bs.stock)
+                price = tick.last_price if tick and tick.last_price > 0 else 0
+                if price <= 0:
+                    continue
+                stock_qty = max(int(slice_qty * bs.weight / total_weight / 100) * 100, 100)
+                child_id = self.submit_order(
+                    op_type=OP_BUY if bs.optType == OP_BUY else OP_SELL,
+                    order_type=ORDER_MARKET,
+                    stockcode=bs.stock,
+                    quantity=stock_qty,
+                    price=price,
+                    strategy_name=ao.strategy_name,
+                )
+                if child_id > 0:
+                    ao.child_order_ids.append(child_id)
+        else:
+            # 单股 algo
+            tick = self._ticks.get(ao.stockcode)
+            price = tick.last_price if tick and tick.last_price > 0 else 0
+            if price <= 0:
+                return
+            child_id = self.submit_order(
+                op_type=OP_BUY,
+                order_type=ORDER_MARKET,
+                stockcode=ao.stockcode,
+                quantity=slice_qty,
+                price=price,
+                strategy_name=ao.strategy_name,
+            )
+            if child_id > 0:
+                ao.child_order_ids.append(child_id)
+
+        ao.executed_quantity += slice_qty
+        ao.slices_executed += 1

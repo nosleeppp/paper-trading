@@ -34,7 +34,10 @@ from typing import Dict, List, Optional, Any
 from paper_trading.broker import PaperBroker, BrokerConfig
 from paper_trading.qmt_compat import (
     Context, PositionInfo, OrderInfo, TickData,
-    passorder, OP_BUY, OP_SELL, ORDER_MARKET,
+    passorder, set_basket, order_algo,
+    OP_BUY, OP_SELL, OP_BUY_BASKET, OP_SELL_BASKET,
+    ORDER_LIMIT, ORDER_MARKET,
+    ORDER_BASKET_BY_QTY, ORDER_BASKET_BY_AMOUNT, ORDER_BASKET_BY_RATIO,
 )
 from paper_trading.data_provider import DataProvider
 
@@ -186,6 +189,15 @@ class PaperEngine:
                 except Exception as e:
                     logger.error(f"[Engine] handlebar 异常 {self.current_time}: {e}")
 
+            # 执行算法订单切片（TWAP/VWAP）
+            self.broker.process_algo_orders(
+                current_minute=self._minute_index,
+                baskets=self.ctx._baskets,
+            )
+            # 算法执行后刷新资金状态
+            self.ctx.capital = self.broker.cash
+            self.ctx.portfolio_value = self.broker.total_value
+
             # 记录分钟快照
             self._minute_snapshots.append({
                 'time': self.current_time,
@@ -245,6 +257,25 @@ class PaperEngine:
                 'quantity': o.filled_quantity,
                 'price': o.filled_price,
             } for o in today_orders],
+            'basket_orders': [{
+                'basket_id': bo.basket_id,
+                'basket_name': bo.basket_name,
+                'status': bo.status,
+                'volume': bo.volume,
+                'child_count': bo.total_child_count,
+                'filled_count': bo.filled_child_count,
+            } for bo in self.broker.get_basket_orders()],
+            'algo_orders': [{
+                'algo_id': ao.algo_id,
+                'algo_type': ao.algo_type,
+                'stockcode': ao.stockcode,
+                'basket_name': ao.basket_name,
+                'status': ao.status,
+                'total_quantity': ao.total_quantity,
+                'executed_quantity': ao.executed_quantity,
+                'slices_total': ao.slices_total,
+                'slices_executed': ao.slices_executed,
+            } for ao in self.broker.get_algo_orders()],
             'minute_snapshots': self._minute_snapshots,
         }
 
@@ -260,6 +291,12 @@ class PaperEngine:
         print(f"  累计收益:     {report['total_return']:+.2%}")
         print(f"  持仓数:       {len(report['positions'])}")
         print(f"  今日成交:     {len(report['trades'])} 笔")
+        if report.get('basket_orders'):
+            filled = sum(1 for bo in report['basket_orders'] if bo['status'] == 'filled')
+            print(f"  篮子订单:     {len(report['basket_orders'])} 个 ({filled} 已完成)")
+        if report.get('algo_orders'):
+            completed = sum(1 for ao in report['algo_orders'] if ao['status'] == 'completed')
+            print(f"  算法订单:     {len(report['algo_orders'])} 个 ({completed} 已完成)")
         print(f"{'='*50}")
 
     # ── 策略加载 ──────────────────────────────────────────
@@ -278,11 +315,19 @@ class PaperEngine:
         spec.loader.exec_module(mod)
         self.strategy_module = mod
 
-        # 将 passorder 注入到策略模块命名空间
+        # 将 QMT 兼容 API 注入到策略模块命名空间
         mod.passorder = passorder
+        mod.set_basket = set_basket
+        mod.order_algo = order_algo
         mod.OP_BUY = OP_BUY
         mod.OP_SELL = OP_SELL
+        mod.OP_BUY_BASKET = OP_BUY_BASKET
+        mod.OP_SELL_BASKET = OP_SELL_BASKET
+        mod.ORDER_LIMIT = ORDER_LIMIT
         mod.ORDER_MARKET = ORDER_MARKET
+        mod.ORDER_BASKET_BY_QTY = ORDER_BASKET_BY_QTY
+        mod.ORDER_BASKET_BY_AMOUNT = ORDER_BASKET_BY_AMOUNT
+        mod.ORDER_BASKET_BY_RATIO = ORDER_BASKET_BY_RATIO
 
     # ── 工具 ──────────────────────────────────────────────
 
