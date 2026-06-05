@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0] - 2026-06-05
+
+### Features
+- Web 可视化面板重构：实盘监控 + 回测分析双 Tab 布局
+- 在线回测：输入日期区间，后台异步运行 quant_backtest，前端实时展示
+- 导入回测：支持粘贴 JSON 或上传文件，即时渲染净值曲线/成交记录
+- 实盘 vs 回测对比图：底部全宽双线叠加 ECharts 净值对比
+- API: `/api/backtest/run`, `/api/backtest/result`, `/api/backtest/upload`, `/api/backtest/list`
+- API: `/api/paper/update` 供 engine 写入实盘状态，`/api/status` 返回真实数据
+- app.py 全局共享状态 `_paper_state` / `_backtest_tasks`
+- 策略适配器: `strategies/pcat_icir_100_monthly.py` 桥接 quant_backtest → paper_trading
+
 ## [0.2.0] - 2026-06-04
 
 ### Features

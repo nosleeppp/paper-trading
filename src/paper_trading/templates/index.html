@@ -9,58 +9,152 @@
 </head>
 <body>
     <header>
-        <h1>📊 实盘模拟监控</h1>
+        <h1>📊 量化策略监控面板</h1>
         <div id="status-bar">
             <span id="clock">--</span>
             <span id="market-status" class="badge">--</span>
         </div>
     </header>
 
-    <div class="summary-cards">
-        <div class="card">
-            <div class="card-label">总资产</div>
-            <div class="card-value" id="total-value">--</div>
+    <!-- 顶层 Tab -->
+    <nav class="top-tabs">
+        <button class="tab-btn active" data-tab="paper">📈 实盘监控</button>
+        <button class="tab-btn" data-tab="backtest">📋 回测分析</button>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- 实盘监控 Tab -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <div id="tab-paper" class="tab-content active">
+        <div class="summary-cards">
+            <div class="card"><div class="card-label">总资产</div><div class="card-value" id="total-value">--</div></div>
+            <div class="card"><div class="card-label">可用资金</div><div class="card-value" id="capital">--</div></div>
+            <div class="card"><div class="card-label">累计收益</div><div class="card-value" id="total-return">--</div></div>
+            <div class="card"><div class="card-label">持仓数</div><div class="card-value" id="pos-count">--</div></div>
         </div>
-        <div class="card">
-            <div class="card-label">可用资金</div>
-            <div class="card-value" id="capital">--</div>
-        </div>
-        <div class="card">
-            <div class="card-label">累计收益</div>
-            <div class="card-value" id="total-return">--</div>
-        </div>
-        <div class="card">
-            <div class="card-label">持仓数</div>
-            <div class="card-value" id="pos-count">--</div>
+
+        <div class="main-grid">
+            <div class="panel">
+                <h3>📈 净值曲线</h3>
+                <div id="chart-nav-paper" class="chart-box"></div>
+            </div>
+            <div class="panel">
+                <h3>📋 持仓明细</h3>
+                <div class="table-wrap"><table id="positions-table">
+                    <thead><tr><th>代码</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏</th></tr></thead>
+                    <tbody></tbody></table>
+                </div>
+            </div>
+            <div class="panel">
+                <h3>📝 成交记录</h3>
+                <div class="table-wrap"><table id="trades-table">
+                    <thead><tr><th>时间</th><th>代码</th><th>方向</th><th>数量</th><th>价格</th></tr></thead>
+                    <tbody></tbody></table>
+                </div>
+            </div>
+            <div class="panel">
+                <h3>📉 日内走势</h3>
+                <div id="chart-intraday" class="chart-box"></div>
+            </div>
         </div>
     </div>
 
-    <div class="main-grid">
-        <div class="panel">
-            <h3>📈 净值曲线</h3>
-            <div id="chart-nav" style="height:360px"></div>
-        </div>
-        <div class="panel">
-            <h3>📋 持仓明细</h3>
-            <div class="table-wrap">
-                <table id="positions-table">
-                    <thead><tr><th>代码</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏</th></tr></thead>
-                    <tbody></tbody>
-                </table>
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- 回测分析 Tab -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <div id="tab-backtest" class="tab-content">
+        <!-- 回测子 Tab -->
+        <nav class="sub-tabs">
+            <button class="sub-tab-btn active" data-subtab="bt-run">⚡ 在线回测</button>
+            <button class="sub-tab-btn" data-subtab="bt-upload">📥 导入结果</button>
+        </nav>
+
+        <!-- 在线回测 -->
+        <div id="subtab-bt-run" class="subtab-content active">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>开始日期</label>
+                    <input type="date" id="bt-start" value="2024-01-01">
+                </div>
+                <div class="form-group">
+                    <label>结束日期</label>
+                    <input type="date" id="bt-end">
+                </div>
+                <div class="form-group">
+                    <label>初始资金（万）</label>
+                    <input type="number" id="bt-capital" value="10000" min="100">
+                </div>
+                <div class="form-group">
+                    <label>策略模块路径（可选）</label>
+                    <input type="text" id="bt-strategy" placeholder="留空使用内置策略">
+                </div>
+                <button class="btn primary" id="btn-run-bt" onclick="runBacktest()">▶ 运行回测</button>
+            </div>
+            <div id="bt-run-status" class="status-msg"></div>
+            <div id="bt-run-progress" class="progress-bar" style="display:none">
+                <div class="progress-fill"></div>
             </div>
         </div>
-        <div class="panel">
-            <h3>📝 今日成交</h3>
-            <div class="table-wrap">
-                <table id="trades-table">
-                    <thead><tr><th>时间</th><th>代码</th><th>方向</th><th>数量</th><th>价格</th></tr></thead>
-                    <tbody></tbody>
-                </table>
+
+        <!-- 导入结果 -->
+        <div id="subtab-bt-upload" class="subtab-content">
+            <div class="form-row">
+                <div class="form-group" style="flex:2">
+                    <label>粘贴 JSON 回测结果</label>
+                    <textarea id="bt-json-input" rows="8" placeholder='{
+  "account": {"total_return": 0.15, "sharpe": 1.2, "max_drawdown": -0.08},
+  "nav_series": [
+    {"date": "2024-01-02", "nav": 1.000},
+    {"date": "2024-01-03", "nav": 1.005}
+  ],
+  "trades": [
+    {"time": "2024-01-02", "stockcode": "000001.SZ", "side": "BUY", "quantity": 1000, "price": 10.5}
+  ]
+}'></textarea>
+                </div>
+                <div class="form-group" style="flex:1; align-self:flex-end; display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:12px;color:#7f8c8d;">或上传 JSON 文件</span>
+                    <input type="file" id="bt-file-input" accept=".json" onchange="uploadBacktestFile(event)">
+                    <button class="btn primary" onclick="uploadBacktestJSON()">📤 导入并展示</button>
+                </div>
+            </div>
+            <div id="bt-upload-status" class="status-msg"></div>
+        </div>
+
+        <!-- 回测结果展示 -->
+        <div id="bt-results" style="display:none">
+            <div class="summary-cards" id="bt-cards">
+                <div class="card"><div class="card-label">累计收益</div><div class="card-value" id="bt-return">--</div></div>
+                <div class="card"><div class="card-label">年化收益</div><div class="card-value" id="bt-annual">--</div></div>
+                <div class="card"><div class="card-label">夏普比率</div><div class="card-value" id="bt-sharpe">--</div></div>
+                <div class="card"><div class="card-label">最大回撤</div><div class="card-value" id="bt-dd">--</div></div>
+                <div class="card"><div class="card-label">胜率</div><div class="card-value" id="bt-winrate">--</div></div>
+                <div class="card"><div class="card-label">成交笔数</div><div class="card-value" id="bt-trade-count">--</div></div>
+            </div>
+
+            <div class="main-grid">
+                <div class="panel">
+                    <h3>📈 回测净值曲线</h3>
+                    <div id="chart-nav-bt" class="chart-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>📝 回测成交记录</h3>
+                    <div class="table-wrap"><table id="bt-trades-table">
+                        <thead><tr><th>日期</th><th>代码</th><th>方向</th><th>数量</th><th>价格</th></tr></thead>
+                        <tbody></tbody></table>
+                    </div>
+                </div>
             </div>
         </div>
-        <div class="panel">
-            <h3>📉 日内走势</h3>
-            <div id="chart-intraday" style="height:360px"></div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- 底部对比图（全宽、始终可见） -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <div class="compare-section" id="compare-section" style="display:none">
+        <div class="panel full-width">
+            <h3>📊 实盘 vs 回测 净值对比</h3>
+            <div id="chart-compare" class="chart-box" style="height:360px"></div>
         </div>
     </div>
 
