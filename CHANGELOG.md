@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0] - 2026-06-05
+
+### Changed
+- 架构重构: 分离通用部署模板与策略专属部署
+- deploy/template/: 通用部署模板，任何策略可复制使用
+- ICIR策略适配器从包内移除，独立到策略部署目录
+- engine.py: run() 自动调用 update_paper_state() 同步 Web 面板
+- 策略适配器: 路径全部改为环境变量驱动 (PAPER_DATA_DIR 等)
+
 ## [0.3.0] - 2026-06-05
 
 ### Features
