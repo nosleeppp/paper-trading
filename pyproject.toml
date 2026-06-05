@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paper-trading"
-version = "0.4.1"
+version = "0.4.2"
 description = "实盘模拟系统 — QMT兼容策略接口 + 逐分钟撮合 + Web监控面板"
 readme = "README.md"
 license = "MIT"
@@ -29,10 +29,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "black>=23.0"]
-trading-calendar = ["akshare>=1.18"]
 ws = ["websocket-client>=1.9"]
 sina = ["requests>=2.0"]
-all = ["akshare>=1.18", "websocket-client>=1.9", "requests>=2.0"]
+all = ["websocket-client>=1.9", "requests>=2.0"]
 
 [project.scripts]
 paper-trading = "paper_trading.cli:main"

@@ -11,8 +11,13 @@
 用法:
   paper-trading run --strategy strategies/my_strategy.py
   paper-trading daemon --strategy strategies/my_strategy.py
+
+交易日历:
+  通过环境变量 PAPER_TRADE_CALENDAR 指定文件路径，或代码中调用 set_trade_calendar_file()。
+  文件格式: 每行一个日期，YYYY-MM-DD 或 YYYYMMDD，支持 # 注释行。
 """
 
+import os
 import time
 import logging
 from datetime import datetime, date, time as dtime
@@ -28,35 +33,68 @@ LUNCH_START = dtime(11, 30)
 LUNCH_END = dtime(13, 0)
 
 
-# akshare 交易日历缓存（按年刷新）
+# ── 交易日历 ────────────────────────────────────────────────
+_trade_calendar_file: Optional[str] = None
 _trade_calendar_cache: Optional[Set[date]] = None
-_trade_calendar_cache_year: Optional[int] = None
 
 
-def _fetch_trade_calendar_from_akshare() -> Optional[Set[date]]:
-    """通过 akshare 获取 A 股交易日历，返回 date 集合；失败返回 None。"""
-    global _trade_calendar_cache, _trade_calendar_cache_year
-    current_year = date.today().year
+def set_trade_calendar_file(filepath: str) -> None:
+    """
+    设置交易日历文件路径。调用后立即生效，is_trading_day 会从该文件读取。
+    文件格式: 每行一个日期 YYYY-MM-DD 或 YYYYMMDD，空行和 # 开头的注释行自动跳过。
+    """
+    global _trade_calendar_file, _trade_calendar_cache
+    _trade_calendar_file = filepath
+    _trade_calendar_cache = None
+    logger.info("交易日历文件已设置: %s", filepath)
 
-    # 缓存命中且年份一致，直接返回
-    if _trade_calendar_cache is not None and _trade_calendar_cache_year == current_year:
+
+def _load_trade_calendar_from_file() -> Optional[Set[date]]:
+    """从文件加载交易日历，成功返回 set 否则 None。"""
+    global _trade_calendar_cache, _trade_calendar_file
+
+    if _trade_calendar_cache is not None:
         return _trade_calendar_cache
 
-    try:
-        import akshare as ak
+    # 优先代码设置的路径，其次环境变量
+    if _trade_calendar_file is None:
+        env_file = os.environ.get('PAPER_TRADE_CALENDAR', '')
+        if env_file:
+            _trade_calendar_file = env_file
 
-        df = ak.tool_trade_date_hist_sina()
-        # trade_date 列已经是 date 对象，直接转为 set
-        _trade_calendar_cache = set(df["trade_date"])
-        _trade_calendar_cache_year = current_year
-        logger.info(
-            "已从 akshare 加载交易日历，共 %d 个交易日",
-            len(_trade_calendar_cache),
-        )
-        return _trade_calendar_cache
-    except (ImportError, ValueError, OSError):
-        logger.warning("无法从 akshare 获取交易日历", exc_info=True)
+    if _trade_calendar_file is None:
         return None
+
+    if not os.path.exists(_trade_calendar_file):
+        logger.warning("交易日历文件不存在: %s", _trade_calendar_file)
+        return None
+
+    dates = set()
+    try:
+        with open(_trade_calendar_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                # 支持 YYYY-MM-DD 或 YYYYMMDD
+                clean = line.replace('-', '')
+                if len(clean) == 8 and clean.isdigit():
+                    dt = date(int(clean[:4]), int(clean[4:6]), int(clean[6:8]))
+                    dates.add(dt)
+        _trade_calendar_cache = dates
+        logger.info("交易日历已加载: %d 天 (来源: %s)", len(dates), _trade_calendar_file)
+        return dates
+    except Exception:
+        logger.warning("交易日历文件读取失败: %s", _trade_calendar_file, exc_info=True)
+        return None
+
+
+def _get_trade_calendar() -> Optional[Set[date]]:
+    """获取交易日历 — 优先参数 > 文件 > RuntimeError。"""
+    calendar = _load_trade_calendar_from_file()
+    if calendar is not None:
+        return calendar
+    return None
 
 
 def is_trading_day(
@@ -66,28 +104,32 @@ def is_trading_day(
     """
     判断是否为 A 股交易日。
 
-    优先级：
-    1. 运行时提供的 trade_calendar（date 对象集合）
-    2. 通过 akshare 公开信息源获取交易日历
-    3. 以上均不可用时抛出 RuntimeError
+    优先级:
+    1. 参数 trade_calendar — 调用方直接传入的 date 集合
+    2. 文件 — set_trade_calendar_file() 或环境变量 PAPER_TRADE_CALENDAR 指定的文件
+    3. 无可用数据源 — 抛出 RuntimeError
     """
     if d is None:
         d = datetime.now()
 
     check_date = d.date() if isinstance(d, datetime) else d
 
-    # 优先使用运行时提供的交易日历数据
+    # 1. 参数提供的交易日历
     if trade_calendar is not None:
         return check_date in trade_calendar
 
-    # 其次使用 akshare 公开信息源
-    calendar = _fetch_trade_calendar_from_akshare()
+    # 2. 文件加载的交易日历
+    calendar = _get_trade_calendar()
     if calendar is not None:
         return check_date in calendar
 
-    # akshare 不可用时回退 weekday 近似判断
-    logger.debug("akshare 交易日历不可用，回退 weekday 近似判断")
-    return d.weekday() < 5
+    # 3. 无可用数据源
+    raise RuntimeError(
+        "无法判断交易日：未提供 trade_calendar 参数，且未设置交易日历文件。\n"
+        "请通过 set_trade_calendar_file('/path/to/calendar.txt') 或\n"
+        "环境变量 PAPER_TRADE_CALENDAR 指定交易日历文件路径。\n"
+        "文件格式: 每行一个日期 YYYY-MM-DD 或 YYYYMMDD。"
+    )
 
 
 def is_trading_time(dt: datetime = None) -> bool:
@@ -104,13 +146,13 @@ def is_trading_time(dt: datetime = None) -> bool:
     return True
 
 
-def run_daily(strategy_file: str, **engine_kwargs):
+def run_daily(strategy_file: str, trade_calendar: Set[date] = None, **engine_kwargs):
     """
     每日运行入口——在交易日 15:00 后触发。
 
     通常配置为 cron: 0 15 * * 1-5
     """
-    if not is_trading_day():
+    if not is_trading_day(trade_calendar=trade_calendar):
         print("[Scheduler] 非交易日，跳过")
         return
 
@@ -124,7 +166,8 @@ def run_daily(strategy_file: str, **engine_kwargs):
     return report
 
 
-def run_daemon(strategy_file: str, poll_interval: int = 60, **engine_kwargs):
+def run_daemon(strategy_file: str, poll_interval: int = 60,
+               trade_calendar: Set[date] = None, **engine_kwargs):
     """
     守护进程模式——持续运行，每个交易日自动触发。
 
@@ -138,7 +181,9 @@ def run_daemon(strategy_file: str, poll_interval: int = 60, **engine_kwargs):
         today_str = now.strftime('%Y%m%d')
 
         # 交易日 15:00 后运行一次
-        if is_trading_day(now) and now.time() > TRADING_END and last_run_date != today_str:
+        if is_trading_day(now, trade_calendar=trade_calendar) \
+                and now.time() > TRADING_END \
+                and last_run_date != today_str:
             print(f"[Daemon] 触发日度结算: {today_str}")
             try:
                 from paper_trading.engine import PaperEngine
