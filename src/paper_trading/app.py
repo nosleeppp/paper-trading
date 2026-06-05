@@ -83,15 +83,39 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
     try:
         _backtest_tasks[task_id]["status"] = "running"
 
-        # 将 pythonpath 加入搜索路径（使 quant_backtest 可被找到）
+        # 将 pythonpath 及下级 site-packages 加入搜索路径
         if pythonpath:
             import sys
             for p in pythonpath.split(":"):
                 p = p.strip()
-                if p and p not in sys.path:
+                if not p:
+                    continue
+                if p not in sys.path:
                     sys.path.insert(0, p)
+                # 同时搜索 pythonpath 下的 site-packages
+                for sub in ('lib', 'lib64'):
+                    sp = os.path.join(p, sub)
+                    for entry in os.listdir(sp) if os.path.isdir(sp) else []:
+                        if entry.startswith('python') and 'site-packages' in os.listdir(os.path.join(sp, entry)):
+                            spp = os.path.join(sp, entry, 'site-packages')
+                            if spp not in sys.path:
+                                sys.path.insert(0, spp)
 
-        from quant_backtest import Backtester, DataCache
+        # 尝试导入 quant_backtest
+        try:
+            from quant_backtest import Backtester, DataCache
+        except ImportError as e:
+            import sys, importlib.util
+            spec = importlib.util.find_spec('quant_backtest')
+            found_at = spec.origin if spec else 'NOT FOUND'
+            raise ImportError(
+                f"无法导入 quant_backtest.Backtester\n"
+                f"  quant_backtest 位置: {found_at}\n"
+                f"  sys.path 前5项: {sys.path[:5]}\n"
+                f"  请确认 PYTHONPATH 指向 quant_backtest 所在目录,\n"
+                f"  并在该目录的 venv 中安装 paper_trading,\n"
+                f"  或使用「导入结果」模式上传回测输出文件。"
+            ) from e
 
         data_dir = data_dir or '/root/lqq_bot_workspace/data'
         output_dir = os.path.join(os.path.dirname(data_dir), 'zz1000', 'output')
