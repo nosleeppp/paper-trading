@@ -133,31 +133,63 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
             data_cache=data_cache,
         )
 
-        if strategy_module:
-            import importlib
-            # strategy_module 可以是文件路径或模块名
-            if strategy_module.endswith('.py') and os.path.exists(strategy_module):
-                mod = importlib.import_module(
-                    os.path.splitext(os.path.basename(strategy_module))[0]
-                ) if '.' not in os.path.basename(strategy_module) else None
-                if mod is None:
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location('_bt_strategy', strategy_module)
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-            else:
-                mod = importlib.import_module(strategy_module)
+        # ── 加载策略模块（支持文件路径 / dotted path）──
+        if not strategy_module:
+            raise ValueError(
+                "未指定策略模块。请在「策略模块路径」中填写策略文件的路径。\n"
+                "例如: /root/lqq_bot_workspace/zz1000/strategies/v0/xxx.py\n"
+                "或 dotted path: zz1000.strategies.v0.xxx"
+            )
 
-            for name in dir(mod):
-                obj = getattr(mod, name)
-                if (isinstance(obj, type) and hasattr(obj, 'initialize')
-                        and hasattr(obj, 'schedule_handler') and hasattr(obj, 'NAME')):
-                    strategy = obj(data_dir=data_dir)
-                    bt.set_strategies(
-                        initialize=strategy.initialize,
-                        schedule_handler=strategy.schedule_handler,
-                    )
-                    break
+        import importlib.util as _util
+
+        # 文件路径方式
+        mod = None
+        if strategy_module.endswith('.py'):
+            if os.path.isabs(strategy_module) and os.path.exists(strategy_module):
+                spec = _util.spec_from_file_location('_bt_strategy', strategy_module)
+                mod = _util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+            elif pythonpath:
+                fpath = os.path.join(pythonpath, strategy_module)
+                if os.path.exists(fpath):
+                    spec = _util.spec_from_file_location('_bt_strategy', fpath)
+                    mod = _util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+
+        # dotted import
+        if mod is None:
+            try:
+                mod = __import__(strategy_module, fromlist=['*'])
+            except ImportError:
+                pass
+
+        if mod is None:
+            raise ImportError(
+                f"无法加载策略模块: {strategy_module}\n"
+                f"  PYTHONPATH={pythonpath}\n"
+                "  请确认文件路径正确，或使用「导入结果」模式。"
+            )
+
+        # 查找策略类
+        strategy_loaded = False
+        for name in dir(mod):
+            obj = getattr(mod, name)
+            if (isinstance(obj, type) and hasattr(obj, 'initialize')
+                    and hasattr(obj, 'schedule_handler') and hasattr(obj, 'NAME')):
+                strategy = obj(data_dir=data_dir)
+                bt.set_strategies(
+                    initialize=strategy.initialize,
+                    schedule_handler=strategy.schedule_handler,
+                )
+                strategy_loaded = True
+                break
+
+        if not strategy_loaded:
+            raise ValueError(
+                f"在 {strategy_module} 中未找到策略类\n"
+                "策略类需有 initialize, schedule_handler, NAME 属性"
+            )
 
         bt.run()
 

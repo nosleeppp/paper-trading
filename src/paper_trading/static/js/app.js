@@ -312,11 +312,22 @@ function updatePositionsTable(positions, tableId) {
 function updateTradesTable(trades, tableId) {
     const tbody = document.querySelector('#' + tableId + ' tbody');
     if (!tbody) return;
-    tbody.innerHTML = trades.slice(-30).reverse().map(o => `
-        <tr><td>${o.time || o.date || ''}</td><td>${o.stockcode || ''}</td>
-        <td style="color:${o.side==='BUY'?'#e74c3c':'#27ae60'}">${o.side==='BUY'?'买入':'卖出'}</td>
-        <td>${o.quantity || 0}</td><td>${(o.price || 0).toFixed(2)}</td></tr>
+    tbody.innerHTML = trades.slice(-50).reverse().map(o => `
+        <tr data-date="${o.time || o.date || ''}" data-code="${o.stockcode || ''}">
+            <td>${o.time || o.date || ''}</td><td>${o.stockcode || ''}</td>
+            <td style="color:${o.side==='BUY'?'#e74c3c':'#27ae60'}">${o.side==='BUY'?'买入':'卖出'}</td>
+            <td>${o.quantity || 0}</td><td>${(o.price || 0).toFixed(2)}</td></tr>
     `).join('');
+}
+
+function filterBtTrades() {
+    const filter = (document.getElementById('bt-trade-filter')?.value || '').toLowerCase();
+    const rows = document.querySelectorAll('#bt-trades-table tbody tr');
+    rows.forEach(row => {
+        const date = (row.dataset.date || '').toLowerCase();
+        const code = (row.dataset.code || '').toLowerCase();
+        row.style.display = (!filter || date.includes(filter) || code.includes(filter)) ? '' : 'none';
+    });
 }
 
 function updateNavChart(data, chart) {
