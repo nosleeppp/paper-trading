@@ -71,16 +71,41 @@ def _load_trade_calendar_from_file() -> Optional[Set[date]]:
 
     dates = set()
     try:
-        with open(_trade_calendar_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                # 支持 YYYY-MM-DD 或 YYYYMMDD
-                clean = line.replace('-', '')
-                if len(clean) == 8 and clean.isdigit():
-                    dt = date(int(clean[:4]), int(clean[4:6]), int(clean[6:8]))
-                    dates.add(dt)
+        ext = os.path.splitext(_trade_calendar_file)[1].lower()
+
+        if ext in ('.parquet', '.pq'):
+            # Parquet 格式 → pandas 读取
+            import pandas as pd
+            df = pd.read_parquet(_trade_calendar_file)
+            # 常见的日期列名
+            date_col = None
+            for col in ('trade_date', 'cal_date', 'date', 'calendar_date', 'trade_dt'):
+                if col in df.columns:
+                    date_col = col
+                    break
+            if date_col is None:
+                date_col = df.columns[0]
+            for val in df[date_col]:
+                if hasattr(val, 'date'):
+                    dates.add(val.date())
+                elif hasattr(val, 'strftime'):
+                    dates.add(val)
+                else:
+                    s = str(val)[:10]
+                    clean = s.replace('-', '')
+                    if len(clean) == 8 and clean.isdigit():
+                        dates.add(date(int(clean[:4]), int(clean[4:6]), int(clean[6:8])))
+        else:
+            # 文本格式：每行一个日期 YYYY-MM-DD 或 YYYYMMDD
+            with open(_trade_calendar_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    clean = line.replace('-', '')
+                    if len(clean) == 8 and clean.isdigit():
+                        dates.add(date(int(clean[:4]), int(clean[4:6]), int(clean[6:8])))
+
         _trade_calendar_cache = dates
         logger.info("交易日历已加载: %d 天 (来源: %s)", len(dates), _trade_calendar_file)
         return dates

@@ -11,19 +11,45 @@ import sys
 
 
 def _load_trade_calendar(calendar_path: str):
-    """从文件加载交易日历，返回 date 集合。"""
+    """从文件加载交易日历（支持 .txt .csv .parquet），返回 date 集合。"""
     if not calendar_path:
         return None
+    import os as _os
     from datetime import date
+
     dates = set()
-    with open(calendar_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            clean = line.replace('-', '')
-            if len(clean) == 8 and clean.isdigit():
-                dates.add(date(int(clean[:4]), int(clean[4:6]), int(clean[6:8])))
+    ext = _os.path.splitext(calendar_path)[1].lower()
+
+    if ext in ('.parquet', '.pq'):
+        import pandas as pd
+        df = pd.read_parquet(calendar_path)
+        date_col = None
+        for col in ('trade_date', 'cal_date', 'date', 'calendar_date', 'trade_dt'):
+            if col in df.columns:
+                date_col = col
+                break
+        if date_col is None:
+            date_col = df.columns[0]
+        for val in df[date_col]:
+            if hasattr(val, 'date'):
+                dates.add(val.date())
+            elif hasattr(val, 'strftime'):
+                dates.add(val)
+            else:
+                s = str(val)[:10]
+                clean = s.replace('-', '')
+                if len(clean) == 8 and clean.isdigit():
+                    dates.add(date(int(clean[:4]), int(clean[4:6]), int(clean[6:8])))
+    else:
+        with open(calendar_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                clean = line.replace('-', '')
+                if len(clean) == 8 and clean.isdigit():
+                    dates.add(date(int(clean[:4]), int(clean[4:6]), int(clean[6:8])))
+
     print(f"[CLI] 交易日历已加载: {len(dates)} 天 (来源: {calendar_path})")
     return dates
 
