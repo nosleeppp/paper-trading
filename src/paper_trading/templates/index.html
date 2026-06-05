@@ -52,7 +52,7 @@
                 <div class="form-group"><label>开始日期</label><input type="date" id="bt-start" value="2024-01-01"></div>
                 <div class="form-group"><label>结束日期</label><input type="date" id="bt-end"></div>
                 <div class="form-group"><label>初始资金（万）</label><input type="number" id="bt-capital" value="10000" min="100"></div>
-                <div class="form-group"><label>策略模块路径</label><input type="text" id="bt-strategy" placeholder="留空使用内置策略"></div>
+                <div class="form-group"><label>策略文件路径 (必填)</label><input type="text" id="bt-strategy" placeholder="zz1000/strategies/v0/xxx.py" value="/root/lqq_bot_workspace/zz1000/strategies/v0/IC5_T100_ICIRTM10_ICIRN20_月频_218因子.py"></div>
                 <div class="form-group"><label>PYTHONPATH</label><input type="text" id="bt-pythonpath" placeholder="/root/lqq_bot_workspace" value="/root/lqq_bot_workspace"></div>
                 <div class="form-group"><label>数据目录</label><input type="text" id="bt-data-dir" placeholder="/root/lqq_bot_workspace/data"></div>
                 <button class="btn primary" id="btn-run-bt" onclick="runBacktest()">运行回测</button>
