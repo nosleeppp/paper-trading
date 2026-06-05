@@ -298,6 +298,99 @@ class PaperStore:
             'targets': json.loads(row[2]), 'target_count': row[3],
         }
 
+    # ── 文件导出（quant_backtest 兼容格式）───────────────
+
+    def export_all(self, output_dir: str, prefix: str = '') -> Dict[str, str]:
+        """
+        导出全部数据到 output_dir，格式与 quant_backtest 一致。
+        返回 {类型: 文件路径} dict。
+        """
+        import os as _os
+        _os.makedirs(output_dir, exist_ok=True)
+
+        p = f'{prefix}_' if prefix else ''
+        files = {}
+        files['trades'] = self.export_trades_csv(_os.path.join(output_dir, f'{p}交易记录.csv'))
+        files['positions'] = self.export_positions_csv(_os.path.join(output_dir, f'{p}持仓记录.csv'))
+        files['nav'] = self.export_nav_xlsx(_os.path.join(output_dir, f'{p}净值序列.xlsx'))
+        files['summary'] = self.export_summary_txt(_os.path.join(output_dir, f'{p}收益概述.txt'))
+        return files
+
+    def export_trades_csv(self, filepath: str) -> str:
+        """导出交易记录到 CSV（quant_backtest 格式）。"""
+        import pandas as pd
+        rows = self._get_conn().execute(
+            "SELECT trade_date, stockcode, side, quantity, price, amount "
+            "FROM orders ORDER BY id"
+        ).fetchall()
+        df = pd.DataFrame(rows, columns=['日期', '证券代码', '交易类型', '成交量', '成交价', '成交金额'])
+        df['交易类型'] = df['交易类型'].map({'BUY': '买入', 'SELL': '卖出'})
+        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        return filepath
+
+    def export_positions_csv(self, filepath: str) -> str:
+        """导出当前持仓到 CSV（quant_backtest 格式）。"""
+        import pandas as pd
+        rows = self._get_conn().execute(
+            "SELECT stockcode, quantity, available, avg_cost, market_value, unrealized_pnl "
+            "FROM positions ORDER BY stockcode"
+        ).fetchall()
+        df = pd.DataFrame(rows, columns=['标的', '数量', '可用数量', '开仓均价', '市值', '盈亏/逐笔浮盈'])
+        df['品种'] = 'Stock'
+        df = df[['品种', '标的', '数量', '可用数量', '开仓均价', '市值', '盈亏/逐笔浮盈']]
+        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        return filepath
+
+    def export_nav_xlsx(self, filepath: str) -> str:
+        """导出净值序列到 Excel（quant_backtest 格式）。"""
+        import pandas as pd
+        rows = self._get_conn().execute(
+            "SELECT date, nav, total_value, position_count, daily_return "
+            "FROM nav_series ORDER BY date"
+        ).fetchall()
+        df = pd.DataFrame(rows, columns=['日期', '策略净值', '总资产', '持仓数量', '日收益率'])
+        df.to_excel(filepath, index=False)
+        return filepath
+
+    def export_summary_txt(self, filepath: str) -> str:
+        """导出收益概述到 TXT（quant_backtest 格式）。"""
+        acc = self.get_account()
+        nav_rows = self._get_conn().execute(
+            "SELECT date, nav FROM nav_series ORDER BY date"
+        ).fetchall()
+
+        total_return = acc.get('total_return', 0)
+        init_cap = acc.get('initial_capital', 1)
+        total_value = acc.get('total_value', init_cap)
+
+        # 计算指标
+        first_nav = nav_rows[0][1] if nav_rows else 1.0
+        last_nav = nav_rows[-1][1] if nav_rows else 1.0
+        start_date = nav_rows[0][0] if nav_rows else ''
+        end_date = nav_rows[-1][0] if nav_rows else ''
+
+        lines = [
+            "=" * 50,
+            "策略收益概述",
+            "=" * 50,
+            f"回测区间: {start_date} ~ {end_date}",
+            "",
+            "=" * 50,
+            "收益指标",
+            "=" * 50,
+            f"总收益率: {total_return*100:.2f}%",
+            f"最终净值: {last_nav:.4f}",
+            f"初始资金: {init_cap:,.0f}",
+            f"最终总资产: {total_value:,.0f}",
+            f"持仓数: {self.position_count()}",
+            f"成交笔数: {len(self.get_orders(limit=99999))}",
+            f"净值记录天数: {len(nav_rows)}",
+        ]
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        return filepath
+
     # ── 整体状态加载 ──────────────────────────────────
 
     def load_state(self) -> dict:
