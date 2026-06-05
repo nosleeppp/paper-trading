@@ -1,0 +1,22 @@
+{
+    "_comment": "=== paper_trading 部署配置 === 按实际情况修改以下字段",
+
+    "capital": 100000000,
+    "start_date": "20250601",
+
+    "signal_file": "signals/targets.json",
+
+    "default_targets": [
+        "000001.SZ", "000002.SZ", "000333.SZ"
+    ],
+
+    "web": {
+        "host": "0.0.0.0",
+        "port": 8899
+    },
+
+    "_quant_backtest (可选)": "如需在线信号生成，取消注释并修改以下配置",
+    "_strategy_module": "your_strategy_module_name",
+    "_collab_root": "/path/to/your/strategies",
+    "_data_dir": "/path/to/your/data"
+}
