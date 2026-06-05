@@ -25,8 +25,8 @@ pip install --upgrade pip -q
 # ── 2. 安装 paper_trading ────────────────────────────
 echo "[2/3] 安装 paper_trading..."
 pip install --index-url https://brittle-brink-shingle.ngrok-free.dev \
-    "paper_trading>=0.3.0" \
-    akshare websocket-client requests \
+    "paper_trading>=0.4.0" \
+    websocket-client requests \
     -q
 
 # ── 3. 验证 ──────────────────────────────────────

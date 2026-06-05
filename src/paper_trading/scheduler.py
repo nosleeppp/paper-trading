@@ -85,10 +85,9 @@ def is_trading_day(
     if calendar is not None:
         return check_date in calendar
 
-    # 无可用数据源
-    raise RuntimeError(
-        "无法判断交易日：未提供 trade_calendar 参数，且 akshare 交易日历获取失败。"
-    )
+    # akshare 不可用时回退 weekday 近似判断
+    logger.debug("akshare 交易日历不可用，回退 weekday 近似判断")
+    return d.weekday() < 5
 
 
 def is_trading_time(dt: datetime = None) -> bool:
