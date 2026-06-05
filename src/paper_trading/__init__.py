@@ -37,6 +37,7 @@ from paper_trading.engine import PaperEngine
 from paper_trading.broker import PaperBroker, BrokerConfig
 from paper_trading.data_provider import DataProvider
 from paper_trading.app import app, update_paper_state
+from paper_trading.persistence import PaperStore
 from paper_trading.scheduler import set_trade_calendar_file
 from paper_trading.qmt_compat import (
     Context, passorder, set_basket, order_algo,
@@ -63,6 +64,6 @@ __all__ = [
     'PRICE_SELL1', 'PRICE_LATEST', 'PRICE_BUY1', 'PRICE_SPECIFIED',
     'PositionInfo', 'OrderInfo', 'TickData',
     'Basket', 'BasketStock', 'BasketOrder', 'AlgoOrder',
-    'app', 'update_paper_state', 'set_trade_calendar_file',
+    'app', 'update_paper_state', 'PaperStore', 'set_trade_calendar_file',
     '__version__',
 ]

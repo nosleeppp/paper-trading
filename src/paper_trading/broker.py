@@ -274,6 +274,59 @@ class PaperBroker:
         self._limit_up.clear()
         self._limit_down.clear()
 
+    # ── 状态恢复 ──────────────────────────────────────────
+
+    def restore(self, state: dict) -> None:
+        """
+        从 store.load_state() 恢复 Broker 状态（幂等启动）。
+        只在 broker 无持仓时执行恢复。
+        """
+        if self._positions:
+            logger.info("[Broker] 已有持仓，跳过恢复")
+            return
+
+        account = state.get('account', {})
+        positions = state.get('positions', {})
+        nav = state.get('nav_series', [])
+        orders = state.get('orders', [])
+
+        # 恢复资金
+        self.cash = account.get('cash', self.config.initial_capital)
+        self.initial_capital = account.get('initial_capital', self.config.initial_capital)
+
+        # 恢复持仓
+        for code, p in positions.items():
+            pi = PositionInfo(
+                stockcode=code,
+                quantity=int(p.get('quantity', 0)),
+                available=int(p.get('available', int(p.get('quantity', 0)))),
+                avg_cost=float(p.get('avg_cost', 0)),
+                market_value=float(p.get('market_value', 0)),
+                unrealized_pnl=float(p.get('unrealized_pnl', 0)),
+            )
+            self._positions[code] = pi
+
+        # 恢复订单历史
+        for o in orders:
+            oi = OrderInfo(
+                stockcode=o.get('stockcode', ''),
+                op_type=OP_BUY if o.get('side') == 'BUY' else OP_SELL,
+                quantity=int(o.get('quantity', 0)),
+                filled_quantity=int(o.get('quantity', 0)),
+                price=float(o.get('price', 0)),
+                filled_price=float(o.get('price', 0)),
+                status='filled',
+                create_time=o.get('time', ''),
+                update_time=o.get('time', ''),
+            )
+            self._order_history.append(oi)
+
+        # 恢复净值序列（存到 engine 的 minute_snapshots 中暂不处理，由 engine 负责）
+        self._restored_nav = nav
+
+        logger.info("[Broker] 状态恢复: cash=%.0f, positions=%d, orders=%d, nav=%d",
+                    self.cash, len(self._positions), len(self._order_history), len(nav))
+
     # ── 查询接口 ──────────────────────────────────────────
 
     def get_position(self, stockcode: str) -> Optional[PositionInfo]:

@@ -37,6 +37,12 @@ _paper_state: Dict[str, Any] = {
 _backtest_tasks: Dict[str, Dict[str, Any]] = {}
 _backtest_task_counter = 0
 
+# 实时更新配置
+_realtime_store: Any = None         # PaperStore 实例，由 bootstrap 注入
+_realtime_targets: List[str] = []   # 持仓标的列表
+_realtime_thread: Optional[threading.Thread] = None
+_realtime_running = False
+
 
 def update_paper_state(report: dict):
     """由 engine 调用，写入实盘状态。"""
@@ -514,6 +520,111 @@ def _calc_drawdown(nav_series: list) -> list:
         dd = (nav - peak) / peak if peak > 0 else 0
         dd_series.append({"date": item["date"], "drawdown": dd})
     return dd_series
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 实时更新循环
+# ═══════════════════════════════════════════════════════════════════════
+
+def start_realtime_updater(store, targets: List[str],
+                           interval: int = 60, flush_interval: int = 300):
+    """
+    启动后台实时更新线程。
+    - 每 interval 秒拉取实时价格，更新持仓市值/PNL
+    - 每 flush_interval 秒持久化到 DB
+    """
+    global _realtime_store, _realtime_targets, _realtime_thread, _realtime_running
+
+    _realtime_store = store
+    _realtime_targets = list(targets)
+    _realtime_running = True
+
+    _realtime_thread = threading.Thread(
+        target=_run_realtime_loop,
+        args=(interval, flush_interval),
+        name="paper-realtime",
+        daemon=True,
+    )
+    _realtime_thread.start()
+    logger = logging.getLogger(__name__)
+    logger.info("[Realtime] 已启动 (interval=%ds, targets=%d)", interval, len(targets))
+
+
+def stop_realtime_updater():
+    """停止实时更新线程。"""
+    global _realtime_running
+    _realtime_running = False
+
+
+def _run_realtime_loop(interval: int, flush_interval: int):
+    """后台循环：拉价格 → 更新状态 → 写 DB。"""
+    import time as _time
+    from paper_trading.data_provider import SinaDataProvider
+    from paper_trading.qmt_compat import TickData
+
+    logger = logging.getLogger(__name__)
+    provider = SinaDataProvider()
+    last_flush = 0
+    ticks_since_flush = 0
+
+    while _realtime_running:
+        try:
+            if _realtime_targets:
+                # 获取实时行情
+                live_ticks = provider.get_ticks_batch(_realtime_targets)
+                if live_ticks:
+                    # 更新 _paper_state 中的持仓价格
+                    with threading.Lock() if hasattr(threading, 'Lock') else _NoLock():
+                        updated = False
+                        positions = _paper_state.get('positions', [])
+                        for pos in positions:
+                            code = pos.get('stockcode', '')
+                            tick = live_ticks.get(code)
+                            if tick and tick.last_price > 0:
+                                pos['price'] = tick.last_price
+                                qty = pos.get('quantity', 0)
+                                pos['market_value'] = qty * tick.last_price
+                                pos['unrealized_pnl'] = qty * (tick.last_price - pos.get('avg_cost', 0))
+                                updated = True
+
+                        if updated:
+                            # 重算 total_value
+                            total_mv = sum(p.get('market_value', 0) for p in positions)
+                            cash = _paper_state['account'].get('capital', 0)
+                            _paper_state['account']['total_value'] = cash + total_mv
+                            init_cap = max(_paper_state['account'].get('initial_capital', 1)
+                                           if 'initial_capital' in _paper_state['account']
+                                           else _paper_state['account'].get('capital', 0) + total_mv, 1)
+                            _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
+
+                            ticks_since_flush += 1
+
+                # 定期持久化
+                now_ts = _time.time()
+                if _realtime_store and (now_ts - last_flush) >= flush_interval:
+                    try:
+                        _realtime_store.save_positions({
+                            p['stockcode']: p for p in _paper_state.get('positions', [])
+                        })
+                        _realtime_store.save_account(_paper_state['account'])
+                        _realtime_store.flush()
+                        last_flush = now_ts
+                        if ticks_since_flush:
+                            logger.debug("[Realtime] flush: %d position updates", ticks_since_flush)
+                            ticks_since_flush = 0
+                    except Exception as e:
+                        logger.warning("[Realtime] flush 失败: %s", e)
+
+        except Exception as e:
+            logger.warning("[Realtime] 更新异常: %s", e)
+
+        _time.sleep(interval)
+
+
+class _NoLock:
+    """Fallback if threading.Lock is unavailable."""
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
 
 
 def create_app():

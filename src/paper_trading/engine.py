@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
 from paper_trading.broker import PaperBroker, BrokerConfig
+from paper_trading.persistence import PaperStore
 from paper_trading.qmt_compat import (
     Context, PositionInfo, OrderInfo, TickData,
     passorder, set_basket, order_algo,
@@ -65,6 +66,7 @@ class PaperEngine:
         data_provider: 'DataProvider' = None,
         broker_config: BrokerConfig = None,
         stock_list: List[str] = None,
+        store: PaperStore = None,
     ):
         self.strategy_file = strategy_file
         self.data_provider = data_provider or DataProvider()
@@ -72,6 +74,7 @@ class PaperEngine:
             initial_capital=initial_capital
         )
         self.stock_list = stock_list or []
+        self.store = store  # 持久化存储（可选）
 
         # 核心组件
         self.broker: Optional[PaperBroker] = None
@@ -105,6 +108,16 @@ class PaperEngine:
         self._minute_snapshots = []
         self._minute_index = 0
 
+        # 0. 从 store 恢复状态（幂等启动）
+        if self.store:
+            self.store.init_db()
+            state = self.store.load_state()
+            if state.get('has_positions'):
+                logger.info("[Engine] 从 DB 恢复状态 (positions=%d)",
+                            len(state.get('positions', {})))
+                # broker 在 _before_market 中创建，这里先暂存恢复数据
+                self._restored_state = state
+
         try:
             # 1. 盘前准备
             self._before_market()
@@ -117,7 +130,11 @@ class PaperEngine:
 
             report = self._build_report()
 
-            # 4. 写入 Web 面板共享状态
+            # 4. 持久化
+            if self.store:
+                self._save_to_store(report)
+
+            # 5. 写入 Web 面板共享状态
             try:
                 from paper_trading.app import update_paper_state
                 update_paper_state(report)
@@ -140,6 +157,11 @@ class PaperEngine:
         # 初始化券商
         self.broker = PaperBroker(self.broker_config)
         self.broker.current_date = self.current_date
+
+        # 从 store 恢复状态（幂等）
+        if self.store and hasattr(self, '_restored_state'):
+            self.broker.restore(self._restored_state)
+            del self._restored_state
 
         # 创建 Context
         self.ctx = Context(
@@ -337,6 +359,41 @@ class PaperEngine:
         mod.ORDER_BASKET_BY_QTY = ORDER_BASKET_BY_QTY
         mod.ORDER_BASKET_BY_AMOUNT = ORDER_BASKET_BY_AMOUNT
         mod.ORDER_BASKET_BY_RATIO = ORDER_BASKET_BY_RATIO
+
+    # ── 持久化 ──────────────────────────────────────────
+
+    def _save_to_store(self, report: dict) -> None:
+        """将 report 写入 PaperStore。"""
+        if not self.store:
+            return
+        # 账户
+        self.store.save_account({
+            'cash': report.get('cash', 0),
+            'total_value': report.get('total_value', 0),
+            'total_return': report.get('total_return', 0),
+            'initial_capital': report.get('initial_capital', 0),
+            'position_count': len(report.get('positions', {})),
+        })
+        # 持仓
+        self.store.save_positions(report.get('positions', {}))
+        # 成交
+        self.store.append_orders(report.get('trades', []))
+        # 净值
+        snapshots = report.get('minute_snapshots', [])
+        if snapshots:
+            last = snapshots[-1]
+            init_cap = report.get('initial_capital', 1)
+            nav = last.get('total_value', 0) / max(init_cap, 1)
+            self.store.append_nav({
+                'date': report.get('date', ''),
+                'nav': nav,
+                'total_value': last.get('total_value', 0),
+                'cash': last.get('capital', 0),
+                'position_count': last.get('positions', 0),
+                'daily_return': report.get('total_return', 0),
+            })
+        self.store.flush()
+        logger.info("[Engine] 状态已持久化到 %s", self.store._db_path)
 
     # ── 工具 ──────────────────────────────────────────────
 
