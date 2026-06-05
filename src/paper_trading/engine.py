@@ -115,7 +115,16 @@ class PaperEngine:
             # 3. 盘后结算
             self._after_market()
 
-            return self._build_report()
+            report = self._build_report()
+
+            # 4. 写入 Web 面板共享状态
+            try:
+                from paper_trading.app import update_paper_state
+                update_paper_state(report)
+            except Exception:
+                pass
+
+            return report
         finally:
             self.is_running = False
 
