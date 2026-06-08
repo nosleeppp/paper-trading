@@ -436,6 +436,54 @@ def _parse_summary_txt(content: bytes) -> dict:
 # Flask app
 # ═══════════════════════════════════════════════════════════════════════
 
+def _load_backtest_folder(folder: str) -> dict:
+    """加载一个回测结果文件夹，返回统一格式。"""
+    import pandas as pd
+
+    result = {'account': {}, 'nav_series': [], 'trades': [], 'positions': []}
+
+    # 交易记录
+    trades_path = os.path.join(folder, '交易记录.csv')
+    if os.path.exists(trades_path):
+        df = pd.read_csv(trades_path, encoding='utf-8-sig')
+        for _, r in df.iterrows():
+            result['trades'].append({
+                'time': str(r['日期']),
+                'stockcode': str(r['证券代码']),
+                'side': 'BUY' if str(r.get('交易类型', '')).strip() == '买入' else 'SELL',
+                'quantity': int(r['成交量']),
+                'price': float(r['成交价']),
+            })
+
+    # 净值序列
+    nav_path = os.path.join(folder, '净值序列.xlsx')
+    if os.path.exists(nav_path):
+        df = pd.read_excel(nav_path)
+        nav_col = '策略净值' if '策略净值' in df.columns else df.columns[2]
+        date_col = df.columns[1]
+        tv_col = '总资产' if '总资产' in df.columns else df.columns[3]
+        for _, r in df.iterrows():
+            result['nav_series'].append({
+                'date': str(r[date_col])[:10].replace('/', '-'),
+                'nav': float(r[nav_col]),
+                'total_value': float(r[tv_col]) if tv_col in df.columns else 0,
+            })
+        if not result['nav_series'].empty if hasattr(result['nav_series'], 'empty') else True:
+            last = result['nav_series'][-1] if result['nav_series'] else {}
+            first = result['nav_series'][0] if result['nav_series'] else {}
+            result['account']['total_return'] = (last.get('nav', 1) - 1.0) if last else 0
+
+    # 收益概述
+    summary_path = os.path.join(folder, '收益概述.txt')
+    if os.path.exists(summary_path):
+        result['account'].update(_parse_summary_txt(open(summary_path, 'rb').read()))
+
+    # 回撤
+    result['drawdown_series'] = _calc_drawdown(result['nav_series'])
+
+    return result
+
+
 def _register_routes(app):
     @app.route('/')
     def index():
@@ -457,198 +505,34 @@ def _register_routes(app):
         update_paper_state(data)
         return jsonify({"success": True})
 
-    # ── 在线回测 ──────────────────────────────────────
+    # ── 回测结果（本地文件夹加载）───────────────────────
 
-    @app.route('/api/backtest/run', methods=['POST'])
-    def api_backtest_run():
-        global _backtest_task_counter
-        data = request.get_json(force=True) or {}
+    @app.route('/api/backtest/years')
+    def api_backtest_years():
+        """返回可用回测年份列表。"""
+        base = os.environ.get('PAPER_BACKTEST_DIR', '')
+        if not base or not os.path.isdir(base):
+            return jsonify([])
+        years = sorted([
+            d for d in os.listdir(base)
+            if os.path.isdir(os.path.join(base, d)) and not d.startswith('.')
+        ], key=lambda x: (x != 'FULL', x))
+        return jsonify(years)
 
-        start_date = data.get('start_date', '20240101')
-        end_date = data.get('end_date', datetime.now().strftime('%Y%m%d'))
-        strategy_module = data.get('strategy_module', None)
-        capital = float(data.get('capital', 100_000_000))
-        pythonpath = data.get('pythonpath', None)
-        data_dir = data.get('data_dir', None)
+    @app.route('/api/backtest/load')
+    def api_backtest_load():
+        """加载指定年份的回测结果。"""
+        year = request.args.get('year', 'FULL')
+        base = os.environ.get('PAPER_BACKTEST_DIR', '')
+        if not base:
+            return jsonify({'error': 'PAPER_BACKTEST_DIR 未设置'}), 404
 
-        _backtest_task_counter += 1
-        task_id = f"bt_{_backtest_task_counter}"
-        _backtest_tasks[task_id] = {"status": "pending", "result": None, "error": None}
+        folder = os.path.join(base, year)
+        if not os.path.isdir(folder):
+            return jsonify({'error': f'文件夹不存在: {folder}'}), 404
 
-        threading.Thread(
-            target=_run_backtest_async,
-            args=(task_id, start_date, end_date, strategy_module, capital,
-                  pythonpath, data_dir),
-            daemon=True,
-        ).start()
-
-        return jsonify({"task_id": task_id})
-
-    @app.route('/api/backtest/result/<task_id>')
-    def api_backtest_result(task_id):
-        task = _backtest_tasks.get(task_id)
-        if task is None:
-            return jsonify({"status": "not_found"}), 404
-        return jsonify({
-            "status": task["status"],
-            "result": task.get("result"),
-            "error": task.get("error"),
-        })
-
-    # ── 导入回测结果（文件上传）─────────────────────────
-
-    @app.route('/api/backtest/upload', methods=['POST'])
-    def api_backtest_upload():
-        """
-        上传 quant_backtest 输出文件，自动解析。
-        文件字段名（均选填，至少传一个）:
-          trades    → 交易记录.csv
-          positions → 持仓记录.csv
-          nav       → 净值序列.xlsx
-          summary   → 收益概述.txt
-        """
-        global _backtest_task_counter
-
-        account = {}
-        nav_series = []
-        trades = []
-        positions = []
-
-        # 解析上传的每个文件
-        if 'trades' in request.files:
-            try:
-                trades = _parse_trades_csv(request.files['trades'].read())
-            except Exception as e:
-                return jsonify({"success": False, "error": f"交易记录解析失败: {e}"}), 400
-
-        if 'positions' in request.files:
-            try:
-                positions = _parse_positions_csv(request.files['positions'].read())
-            except Exception as e:
-                return jsonify({"success": False, "error": f"持仓记录解析失败: {e}"}), 400
-
-        if 'nav' in request.files:
-            try:
-                nav_series = _parse_nav_xlsx(request.files['nav'].read())
-            except Exception as e:
-                return jsonify({"success": False, "error": f"净值序列解析失败: {e}"}), 400
-
-        if 'summary' in request.files:
-            try:
-                account = _parse_summary_txt(request.files['summary'].read())
-            except Exception as e:
-                return jsonify({"success": False, "error": f"收益概述解析失败: {e}"}), 400
-
-        # 如果没有上传文件，尝试 JSON
-        if not any([trades, positions, nav_series, account]):
-            data = request.get_json(silent=True) or {}
-            if data:
-                account = data.get("account", {})
-                nav_series = data.get("nav_series", [])
-                trades = data.get("trades", [])
-                positions = data.get("positions", [])
-            else:
-                return jsonify({"success": False, "error": "请上传至少一个文件"}), 400
-
-        _backtest_task_counter += 1
-        task_id = f"upload_{_backtest_task_counter}"
-
-        _backtest_tasks[task_id] = {
-            "status": "done",
-            "result": {
-                "account": account,
-                "nav_series": nav_series,
-                "trades": trades,
-                "positions": positions,
-                "drawdown_series": _calc_drawdown(nav_series),
-            },
-            "error": None,
-        }
-
-        return jsonify({"success": True, "task_id": task_id,
-                        "parsed": {"nav_days": len(nav_series), "trades": len(trades),
-                                   "positions": len(positions), "account_keys": list(account.keys())}})
-
-    @app.route('/api/strategies')
-    def api_strategies():
-        """
-        扫描 PAPER_STRATEGY_SEARCH_DIR 下的策略文件。
-        只返回包含策略类定义的 .py 文件。
-        """
-        search_dir = os.environ.get('PAPER_STRATEGY_SEARCH_DIR', '')
-        if not search_dir or not os.path.isdir(search_dir):
-            return jsonify({'error': 'PAPER_STRATEGY_SEARCH_DIR 未设置或不存在'}), 404
-
-        STRATEGY_MARKERS = ('FactorStrategyTemplate', '_load_factor_chunk',
-                            'def _on_select', 'def schedule_handler')
-        strategies = []
-        for f in sorted(os.listdir(search_dir)):
-            if not f.endswith('.py') or f.startswith('_') or f.startswith('test'):
-                continue
-            full = os.path.join(search_dir, f)
-            if not os.path.isfile(full):
-                continue
-            try:
-                with open(full, 'r', encoding='utf-8', errors='ignore') as fh:
-                    head = fh.read(4096)
-                if not any(m in head for m in STRATEGY_MARKERS):
-                    continue
-            except Exception:
-                continue
-            strategies.append({
-                'name': f.replace('.py', ''),
-                'path': full,
-                'relpath': f,
-            })
-        return jsonify(strategies)
-
-    @app.route('/api/trade_dates')
-    def api_trade_dates():
-        """返回有成交记录的日期列表（供前端下拉框）。"""
-        if _realtime_store:
-            rows = _realtime_store._get_conn().execute(
-                "SELECT DISTINCT trade_date FROM orders ORDER BY trade_date DESC"
-            ).fetchall()
-            return jsonify([r[0] for r in rows])
-        return jsonify([])
-
-    @app.route('/api/benchmark')
-    def api_benchmark():
-        """
-        基准净值（000852.SH 中证1000），从 PAPER_INDEX_DAILY_PATH 读取。
-        归一化：以首日价格为 1.0。
-        """
         try:
-            import pandas as pd
-            idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
-            if not idx_path:
-                return jsonify({'error': 'PAPER_INDEX_DAILY_PATH 未设置。请在环境变量中指定 index_daily.parquet 路径。'}), 404
-            if not os.path.exists(idx_path):
-                return jsonify({'error': f'文件不存在: {idx_path}'}), 404
-
-            df = pd.read_parquet(idx_path)
-            # 列名可能是 trade_date/ts_code/close 或 date/code/close
-            date_col = next((c for c in ['trade_date', 'date'] if c in df.columns), df.columns[0])
-            code_col = next((c for c in ['ts_code', 'code'] if c in df.columns), df.columns[1])
-            close_col = next((c for c in ['close', 'qfq_close'] if c in df.columns), df.columns[-1])
-
-            bench = df[df[code_col].astype(str).str.replace('.SH', '').str.replace('.SZ', '') == '000852']
-            if bench.empty:
-                return jsonify({'error': 'index_daily.parquet 中未找到 000852'}), 404
-
-            bench = bench.sort_values(date_col)
-            bench['date_str'] = bench[date_col].astype(str).str[:8]
-            base_price = float(bench.iloc[0][close_col])
-
-            if base_price <= 0:
-                return jsonify({'error': '基准首日价格为0'}), 500
-
-            result = []
-            for _, row in bench.iterrows():
-                result.append({
-                    'date': str(row[date_col])[:10].replace('-', ''),
-                    'nav': float(row[close_col]) / base_price,
-                })
+            result = _load_backtest_folder(folder)
             return jsonify(result)
         except Exception as e:
             return jsonify({'error': str(e)}), 500

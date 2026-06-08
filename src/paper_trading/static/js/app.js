@@ -2,16 +2,12 @@
  * 实盘模拟监控 + 回测分析
  */
 const API_STATUS = '/api/status';
-const API_BT_RUN = '/api/backtest/run';
-const API_BT_RESULT = '/api/backtest/result';
-const API_BT_UPLOAD = '/api/backtest/upload';
+const API_BT_YEARS = '/api/backtest/years';
+const API_BT_LOAD = '/api/backtest/load';
 
 let paperData = null;
 let backtestData = null;
-let currentTaskId = null;
-let pollTimer = null;
-
-let chartNavPaper, chartNavBt, chartDDBt, chartCompare;
+let chartNavPaper, chartNavBt, chartDDBt;
 
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
@@ -20,25 +16,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(updateClock, 1000);
     fetchPaperStatus();
     setInterval(fetchPaperStatus, 5000);
+    fetchBacktestYears();
     window.addEventListener('resize', resizeAllCharts);
-    const today = new Date();
-    document.getElementById('bt-end').value = today.toISOString().split('T')[0];
-    fetchStrategies();
 });
-
-async function fetchStrategies() {
-    try {
-        const resp = await fetch('/api/strategies');
-        const strategies = await resp.json();
-        const select = document.getElementById('bt-strategy');
-        if (!select || !strategies.length) return;
-        select.innerHTML = strategies.map(s =>
-            `<option value="${s.path}">${s.relpath} (${s.name})</option>`
-        ).join('');
-    } catch (e) {
-        document.getElementById('bt-strategy').innerHTML = '<option value="">无法加载策略列表</option>';
-    }
-}
 
 // ── 时钟 ────────────────────────────────────────────
 function updateClock() {
@@ -56,11 +36,10 @@ function initCharts() {
     chartNavPaper = echarts.init(document.getElementById('chart-nav-paper'));
     chartNavBt = echarts.init(document.getElementById('chart-nav-bt'));
     chartDDBt = echarts.init(document.getElementById('chart-dd-bt'));
-    chartCompare = echarts.init(document.getElementById('chart-compare'));
 }
 
 function resizeAllCharts() {
-    [chartNavPaper, chartNavBt, chartDDBt, chartCompare].forEach(c => c?.resize());
+    [chartNavPaper, chartNavBt, chartDDBt].forEach(c => c?.resize());
 }
 
 // ── Tabs ────────────────────────────────────────────
@@ -74,14 +53,6 @@ function initTabs() {
             setTimeout(resizeAllCharts, 100);
         });
     });
-    document.querySelectorAll('.sub-tabs .sub-tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.sub-tabs .sub-tab-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            document.querySelectorAll('.subtab-content').forEach(t => t.classList.remove('active'));
-            document.getElementById('subtab-' + btn.dataset.subtab).classList.add('active');
-        });
-    });
 }
 
 // ══════════════════════════════════════════════════════
@@ -92,7 +63,6 @@ async function fetchPaperStatus() {
         const resp = await fetch(API_STATUS);
         paperData = await resp.json();
         if (paperData.account) updatePaperDashboard();
-        tryUpdateCompare();
     } catch (e) { /* ok */ }
 }
 
@@ -112,145 +82,48 @@ function updatePaperDashboard() {
 }
 
 // ══════════════════════════════════════════════════════
-// 在线回测
+// 回测 — 本地文件夹加载
 // ══════════════════════════════════════════════════════
-async function runBacktest() {
-    const startEl = document.getElementById('bt-start');
-    const endEl = document.getElementById('bt-end');
-    const capitalEl = document.getElementById('bt-capital');
-    const strategyEl = document.getElementById('bt-strategy');
-    const statusEl = document.getElementById('bt-run-status');
-    const progressEl = document.getElementById('bt-run-progress');
-
-    const strategyPath = strategyEl.value || '';
-    // auto-detect PYTHONPATH from strategy file path (parent of parent of zz1000/)
-    let pythonpath = '/root/lqq_bot_workspace';
-    if (strategyPath.includes('/strategies/')) {
-        pythonpath = strategyPath.split('/strategies/')[0];
-    } else if (strategyPath.includes('/zz1000/')) {
-        pythonpath = strategyPath.split('/zz1000/')[0];
-    }
-
-    statusEl.textContent = '正在启动回测...';
-    statusEl.className = 'status-msg running';
-    progressEl.style.display = 'block';
-
+async function fetchBacktestYears() {
     try {
-        const resp = await fetch(API_BT_RUN, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                start_date: startEl.value.replace(/-/g, ''),
-                end_date: endEl.value.replace(/-/g, ''),
-                capital: parseFloat(capitalEl.value) * 10000,
-                strategy_module: strategyPath,
-                pythonpath: pythonpath,
-                data_dir: pythonpath + '/data',
-            }),
-        });
-        const data = await resp.json();
-        currentTaskId = data.task_id;
-        statusEl.textContent = '回测运行中...';
-        progressEl.querySelector('.progress-fill').style.width = '20%';
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = setInterval(pollBacktestResult, 1500);
-    } catch (e) {
-        statusEl.textContent = '请求失败: ' + e.message;
-        statusEl.className = 'status-msg error';
-        progressEl.style.display = 'none';
-    }
+        const resp = await fetch(API_BT_YEARS);
+        const years = await resp.json();
+        const select = document.getElementById('bt-year-select');
+        if (!select) return;
+        select.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join('');
+        if (years.length) {
+            select.value = years[0];
+            loadBacktestYear();
+        }
+    } catch (e) { /* ok */ }
 }
 
-async function pollBacktestResult() {
-    if (!currentTaskId) return;
-    try {
-        const resp = await fetch(API_BT_RESULT + '/' + currentTaskId);
-        const data = await resp.json();
-        const statusEl = document.getElementById('bt-run-status');
-        const progressEl = document.getElementById('bt-run-progress');
+async function loadBacktestYear() {
+    const year = document.getElementById('bt-year-select')?.value;
+    const statusEl = document.getElementById('bt-load-status');
+    if (!year) return;
 
-        if (data.status === 'done') {
-            clearInterval(pollTimer); pollTimer = null;
-            statusEl.textContent = '回测完成';
-            statusEl.className = 'status-msg done';
-            progressEl.querySelector('.progress-fill').style.width = '100%';
-            setTimeout(() => { progressEl.style.display = 'none'; }, 500);
-            backtestData = data.result;
-            updateBacktestDashboard();
-            tryUpdateCompare();
-        } else if (data.status === 'error') {
-            clearInterval(pollTimer); pollTimer = null;
-            statusEl.textContent = '回测失败: ' + (data.error || '');
-            statusEl.className = 'status-msg error';
-            progressEl.style.display = 'none';
-        } else {
-            progressEl.querySelector('.progress-fill').style.width = '60%';
-        }
-    } catch (e) { /* keep polling */ }
-}
-
-// ══════════════════════════════════════════════════════
-// 导入回测结果（文件上传）
-// ══════════════════════════════════════════════════════
-async function uploadBacktestFiles() {
-    const statusEl = document.getElementById('bt-upload-status');
-    const formData = new FormData();
-
-    const files = {
-        'trades': 'bt-file-trades',
-        'positions': 'bt-file-positions',
-        'nav': 'bt-file-nav',
-        'summary': 'bt-file-summary',
-    };
-
-    let hasFile = false;
-    for (const [key, elId] of Object.entries(files)) {
-        const el = document.getElementById(elId);
-        if (el && el.files && el.files[0]) {
-            formData.append(key, el.files[0]);
-            hasFile = true;
-        }
-    }
-
-    if (!hasFile) {
-        statusEl.textContent = '请至少选择一个文件';
-        statusEl.className = 'status-msg error';
-        return;
-    }
-
-    statusEl.textContent = '正在上传并解析...';
+    statusEl.textContent = '加载中...';
     statusEl.className = 'status-msg running';
 
     try {
-        const resp = await fetch(API_BT_UPLOAD, { method: 'POST', body: formData });
+        const resp = await fetch(API_BT_LOAD + '?year=' + year);
         const data = await resp.json();
-
-        if (data.success) {
-            const p = data.parsed || {};
-            statusEl.textContent = `解析完成: ${p.nav_days || 0}天净值, ${p.trades || 0}笔交易, ${p.positions || 0}只持仓`;
-            statusEl.className = 'status-msg done';
-
-            // 从 result API 获取完整数据
-            const rResp = await fetch(API_BT_RESULT + '/' + data.task_id);
-            const rData = await rResp.json();
-            if (rData.status === 'done') {
-                backtestData = rData.result;
-                updateBacktestDashboard();
-                tryUpdateCompare();
-            }
-        } else {
-            statusEl.textContent = '解析失败: ' + (data.error || '未知错误');
+        if (data.error) {
+            statusEl.textContent = data.error;
             statusEl.className = 'status-msg error';
+            return;
         }
+        backtestData = data;
+        statusEl.textContent = '';
+        statusEl.className = 'status-msg';
+        updateBacktestDashboard();
     } catch (e) {
-        statusEl.textContent = '上传失败: ' + e.message;
+        statusEl.textContent = '加载失败: ' + e.message;
         statusEl.className = 'status-msg error';
     }
 }
 
-// ══════════════════════════════════════════════════════
-// 回测结果渲染
-// ══════════════════════════════════════════════════════
 function updateBacktestDashboard() {
     if (!backtestData) return;
     document.getElementById('bt-results').style.display = '';
@@ -267,53 +140,25 @@ function updateBacktestDashboard() {
     document.getElementById('bt-alpha').textContent = acc.alpha ? acc.alpha.toFixed(4) : '--';
     document.getElementById('bt-winrate').textContent = acc.win_rate ? (acc.win_rate * 100).toFixed(1) + '%' : '--';
 
-    // 净值图
     updateNavChart(backtestData.nav_series || [], chartNavBt);
-
-    // 回撤图
-    const ddData = backtestData.drawdown_series || [];
-    if (ddData.length && chartDDBt) {
-        chartDDBt.setOption({
-            tooltip: { trigger: 'axis', valueFormatter: v => (v * 100).toFixed(2) + '%' },
-            xAxis: { type: 'category', data: ddData.map(d => d.date), axisLabel: { rotate: 30, fontSize: 10 } },
-            yAxis: { type: 'value', axisLabel: { formatter: v => (v * 100).toFixed(0) + '%' } },
-            series: [{
-                name: '回撤', type: 'line',
-                data: ddData.map(d => d.drawdown),
-                smooth: true, lineStyle: { color: '#e74c3c', width: 2 },
-                areaStyle: { color: 'rgba(231,76,60,0.15)' },
-            }],
-        }, true);
-    }
-
-    // 成交表
+    updateDrawdownChart(backtestData.drawdown_series || []);
     updateTradesTable(backtestData.trades || [], 'bt-trades-table');
-
-    // 持仓表
+    populateBtTradeDates(backtestData.trades || []);
     updatePositionsTable(backtestData.positions || [], 'bt-positions-table');
 }
 
-// ══════════════════════════════════════════════════════
-// 对比图
-// ══════════════════════════════════════════════════════
-function tryUpdateCompare() {
-    if (!paperData || !backtestData) return;
-    const paperNav = (paperData.pnl_curve || []).filter(d => d.nav != null);
-    const btNav = (backtestData.nav_series || []).filter(d => d.nav != null);
-    if (!paperNav.length || !btNav.length) return;
-
-    document.getElementById('compare-section').style.display = '';
-    const paperDates = paperNav.map(d => d.date || d.time || '');
-    chartCompare.setOption({
-        tooltip: { trigger: 'axis' },
-        legend: { data: ['实盘净值', '回测净值'], bottom: 0 },
-        grid: { left: '3%', right: '4%', bottom: '10%', top: '5%', containLabel: true },
-        xAxis: { type: 'category', data: paperDates, axisLabel: { rotate: 30, fontSize: 10 } },
-        yAxis: { type: 'value', axisLabel: { formatter: v => v.toFixed(2) } },
-        series: [
-            { name: '实盘净值', type: 'line', data: paperNav.map(d => d.nav), smooth: true, lineStyle: { color: '#2980b9', width: 2 } },
-            { name: '回测净值', type: 'line', data: btNav.map(d => d.nav), smooth: true, lineStyle: { color: '#e74c3c', width: 2, type: 'dashed' } },
-        ],
+function updateDrawdownChart(data) {
+    if (!chartDDBt || !data.length) return;
+    chartDDBt.setOption({
+        tooltip: { trigger: 'axis', valueFormatter: v => (v * 100).toFixed(2) + '%' },
+        xAxis: { type: 'category', data: data.map(d => d.date), axisLabel: { rotate: 30, fontSize: 10 } },
+        yAxis: { type: 'value', axisLabel: { formatter: v => (v * 100).toFixed(0) + '%' } },
+        series: [{
+            name: '回撤', type: 'line',
+            data: data.map(d => d.drawdown),
+            smooth: true, lineStyle: { color: '#e74c3c', width: 2 },
+            areaStyle: { color: 'rgba(231,76,60,0.15)' },
+        }],
     }, true);
 }
 
@@ -342,36 +187,38 @@ function updateTradesTable(trades, tableId) {
             ${isPaper ? `<td>${fmtWan(o.amount || o.quantity * o.price)}</td>` : ''}
         </tr>
     `).join('');
-    // 填充日期下拉框
     if (isPaper) populateTradeDates(trades);
-}
-
-function filterPaperTrades() {
-    const filter = (document.getElementById('paper-trade-filter')?.value || '').toLowerCase();
-    document.querySelectorAll('#trades-table tbody tr').forEach(row => {
-        const d = (row.dataset.date || '').toLowerCase();
-        row.style.display = (!filter || d.includes(filter)) ? '' : 'none';
-    });
 }
 
 function populateTradeDates(trades) {
     const select = document.getElementById('paper-trade-filter');
     if (!select) return;
-    const dates = [...new Set(trades.map(t => {
-        const ts = (t.time || t.date || '');
-        return ts.length >= 8 ? ts.substring(0, 8) : ts;
-    }))].filter(Boolean).sort().reverse();
+    const dates = [...new Set(trades.map(t => (t.time || t.date || '').substring(0, 8)))].filter(Boolean).sort().reverse();
     select.innerHTML = '<option value="">全部日期</option>' +
         dates.map(d => `<option value="${d}">${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}</option>`).join('');
+}
+
+function filterPaperTrades() {
+    const filter = (document.getElementById('paper-trade-filter')?.value || '').toLowerCase();
+    document.querySelectorAll('#trades-table tbody tr').forEach(row => {
+        row.style.display = (!filter || (row.dataset.date||'').toLowerCase().includes(filter)) ? '' : 'none';
+    });
 }
 
 function filterBtTrades() {
     const filter = (document.getElementById('bt-trade-filter')?.value || '').toLowerCase();
     document.querySelectorAll('#bt-trades-table tbody tr').forEach(row => {
         const d = (row.dataset.date || '').toLowerCase();
-        const c = (row.dataset.code || '').toLowerCase();
-        row.style.display = (!filter || d.includes(filter) || c.includes(filter)) ? '' : 'none';
+        row.style.display = (!filter || d.includes(filter)) ? '' : 'none';
     });
+}
+
+function populateBtTradeDates(trades) {
+    const select = document.getElementById('bt-trade-filter');
+    if (!select) return;
+    const dates = [...new Set(trades.map(t => (t.time || t.date || '').substring(0, 8)))].filter(Boolean).sort().reverse();
+    select.innerHTML = '<option value="">全部日期</option>' +
+        dates.map(d => `<option value="${d}">${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}</option>`).join('');
 }
 
 function updateNavChart(data, chart, benchmark) {
@@ -383,15 +230,13 @@ function updateNavChart(data, chart, benchmark) {
         areaStyle: { color: 'rgba(41,128,185,0.1)' },
     }];
     if (benchmark && benchmark.length) {
-        // 按日期对齐基准
         const bmMap = {};
         benchmark.forEach(b => { bmMap[b.date] = b.nav; });
-        const bmData = data.map(d => bmMap[d.date || d.time] || null);
         series.push({
             name: '中证1000', type: 'line',
-            data: bmData, smooth: true,
+            data: data.map(d => bmMap[d.date || d.time] || null),
+            smooth: true,
             lineStyle: { color: '#95a5a6', width: 1.5, type: 'dashed' },
-            itemStyle: { color: '#95a5a6' },
         });
     }
     chart.setOption({
