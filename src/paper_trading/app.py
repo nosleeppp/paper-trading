@@ -51,6 +51,7 @@ def update_paper_state(report: dict):
         "capital": report.get("cash", 0),
         "total_value": report.get("total_value", 0),
         "total_return": report.get("total_return", 0),
+        "initial_capital": report.get("initial_capital", 0),
         "position_count": len(report.get("positions", {})),
     }
     _paper_state["positions"] = [
@@ -67,7 +68,8 @@ def update_paper_state(report: dict):
     _paper_state["orders"] = [
         {"time": t.get("time", ""), "stockcode": t.get("stockcode", ""),
          "side": t.get("side", "BUY"), "quantity": t.get("quantity", 0),
-         "price": t.get("price", 0)}
+         "price": t.get("price", 0),
+         "amount": t.get("quantity", 0) * t.get("price", 0)}
         for t in report.get("trades", [])
     ]
     _paper_state["pnl_curve"] = [
@@ -558,15 +560,14 @@ def stop_realtime_updater():
 
 
 def _run_realtime_loop(interval: int, flush_interval: int):
-    """后台循环：拉价格 → 更新状态 → 写 DB。"""
+    """后台循环：拉价格 → 更新状态 → 写 DB → 每日追加净值。"""
     import time as _time
     from paper_trading.data_provider import SinaDataProvider
-    from paper_trading.qmt_compat import TickData
 
     logger = logging.getLogger(__name__)
     provider = SinaDataProvider()
     last_flush = 0
-    ticks_since_flush = 0
+    last_nav_date = ''  # 防止同一天重复写 nav
 
     while _realtime_running:
         try:
@@ -574,31 +575,56 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                 # 获取实时行情
                 live_ticks = provider.get_ticks_batch(_realtime_targets)
                 if live_ticks:
-                    # 更新 _paper_state 中的持仓价格
-                    with threading.Lock() if hasattr(threading, 'Lock') else _NoLock():
-                        updated = False
-                        positions = _paper_state.get('positions', [])
-                        for pos in positions:
-                            code = pos.get('stockcode', '')
-                            tick = live_ticks.get(code)
-                            if tick and tick.last_price > 0:
-                                pos['price'] = tick.last_price
-                                qty = pos.get('quantity', 0)
-                                pos['market_value'] = qty * tick.last_price
-                                pos['unrealized_pnl'] = qty * (tick.last_price - pos.get('avg_cost', 0))
-                                updated = True
+                    # 更新内存中的持仓价格
+                    updated = False
+                    positions = _paper_state.get('positions', [])
+                    for pos in positions:
+                        code = pos.get('stockcode', '')
+                        tick = live_ticks.get(code)
+                        if tick and tick.last_price > 0:
+                            pos['price'] = tick.last_price
+                            qty = pos.get('quantity', 0)
+                            pos['market_value'] = qty * tick.last_price
+                            pos['unrealized_pnl'] = qty * (tick.last_price - pos.get('avg_cost', 0))
+                            updated = True
 
-                        if updated:
-                            # 重算 total_value
-                            total_mv = sum(p.get('market_value', 0) for p in positions)
-                            cash = _paper_state['account'].get('capital', 0)
-                            _paper_state['account']['total_value'] = cash + total_mv
-                            init_cap = max(_paper_state['account'].get('initial_capital', 1)
-                                           if 'initial_capital' in _paper_state['account']
-                                           else _paper_state['account'].get('capital', 0) + total_mv, 1)
+                    if updated:
+                        # 重算 total_value / total_return
+                        total_mv = sum(p.get('market_value', 0) for p in positions)
+                        cash = _paper_state['account'].get('capital', 0)
+                        init_cap = _paper_state['account'].get('initial_capital',
+                                     _paper_state['account'].get('capital', 0) + total_mv)
+                        _paper_state['account']['total_value'] = cash + total_mv
+                        if init_cap > 0:
                             _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
 
-                            ticks_since_flush += 1
+                # 每日收盘后追加净值（15:00 后写一次）
+                now = datetime.now()
+                today_str = now.strftime('%Y%m%d')
+                if now.hour >= 15 and today_str != last_nav_date:
+                    try:
+                        positions = _paper_state.get('positions', [])
+                        total_mv = sum(p.get('market_value', 0) for p in positions)
+                        cash = _paper_state['account'].get('capital', 0)
+                        tv = cash + total_mv
+                        init_cap = _paper_state['account'].get('initial_capital', tv)
+                        nav = tv / init_cap if init_cap > 0 else 1.0
+
+                        _realtime_store.append_nav({
+                            'date': today_str,
+                            'nav': nav,
+                            'total_value': tv,
+                            'cash': cash,
+                            'position_count': len(positions),
+                            'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
+                        })
+                        _realtime_store.append_position_snapshot(today_str, {
+                            p['stockcode']: p for p in positions
+                        })
+                        last_nav_date = today_str
+                        logger.info("[Realtime] 净值已追加: %s nav=%.4f", today_str, nav)
+                    except Exception as e:
+                        logger.warning("[Realtime] 净值追加失败: %s", e)
 
                 # 定期持久化
                 now_ts = _time.time()
@@ -610,9 +636,6 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                         _realtime_store.save_account(_paper_state['account'])
                         _realtime_store.flush()
                         last_flush = now_ts
-                        if ticks_since_flush:
-                            logger.debug("[Realtime] flush: %d position updates", ticks_since_flush)
-                            ticks_since_flush = 0
                     except Exception as e:
                         logger.warning("[Realtime] flush 失败: %s", e)
 
@@ -622,10 +645,16 @@ def _run_realtime_loop(interval: int, flush_interval: int):
         _time.sleep(interval)
 
 
-class _NoLock:
-    """Fallback if threading.Lock is unavailable."""
-    def __enter__(self): return self
-    def __exit__(self, *args): pass
+def run_production(host: str = '0.0.0.0', port: int = 8899):
+    """使用 waitress 生产级 WSGI 服务器启动。"""
+    try:
+        from waitress import serve
+        print(f"[Server] waitress 启动 http://{host}:{port}")
+        serve(app, host=host, port=port)
+    except ImportError:
+        print("[Server] waitress 未安装，回退到 Flask 开发服务器")
+        print("[Server] 安装: pip install waitress")
+        app.run(host=host, port=port, debug=False)
 
 
 def create_app():

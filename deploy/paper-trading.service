@@ -1,0 +1,23 @@
+[Unit]
+Description=Paper Trading ICIR Monthly
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/lqq_bot_workspace/ICIR_monthly
+Environment="PATH=/root/lqq_bot_workspace/ICIR_monthly/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/root/lqq_bot_workspace/ICIR_monthly/venv/bin/python \
+    scripts/bootstrap.py \
+    --from-backtest IC5_T100_ICIR20M10_月频_20260528_20260529_20260605_085956 \
+    --trade-calendar /root/lqq_bot_workspace/data/trade_cal/trade_cal.parquet \
+    --backfill backfill.json \
+    --daemon
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/lqq_bot_workspace/ICIR_monthly/logs/stdout.log
+StandardError=append:/root/lqq_bot_workspace/ICIR_monthly/logs/stderr.log
+
+[Install]
+WantedBy=multi-user.target

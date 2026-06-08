@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS position_snapshots (
+    date TEXT NOT NULL,
+    stockcode TEXT NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 0,
+    price REAL NOT NULL DEFAULT 0.0,
+    market_value REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (date, stockcode)
+);
+
 CREATE TABLE IF NOT EXISTS nav_series (
     date TEXT PRIMARY KEY,
     nav REAL NOT NULL,
@@ -184,6 +193,59 @@ class PaperStore:
     def position_count(self) -> int:
         row = self._get_conn().execute("SELECT COUNT(*) FROM positions").fetchone()
         return row[0] if row else 0
+
+    def append_position_snapshot(self, date_str: str, positions: dict) -> None:
+        """追加持仓快照（不覆盖历史）。"""
+        if not positions:
+            return
+        with self._lock:
+            conn = self._get_conn()
+            for code, p in positions.items():
+                qty = int(p.get('quantity', 0))
+                price = float(p.get('price', p.get('avg_cost', 0)))
+                conn.execute(
+                    "INSERT OR REPLACE INTO position_snapshots "
+                    "(date, stockcode, quantity, price, market_value) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (date_str, code, qty, price, qty * price),
+                )
+            conn.commit()
+
+    def get_positions_by_date(self, date_str: str) -> list:
+        rows = self._get_conn().execute(
+            "SELECT stockcode, quantity, price, market_value "
+            "FROM position_snapshots WHERE date=? ORDER BY stockcode",
+            (date_str,)
+        ).fetchall()
+        return [{'stockcode': r[0], 'quantity': r[1], 'price': r[2],
+                 'market_value': r[3]} for r in rows]
+
+    def get_orders_by_date(self, date_str: str = None,
+                           date_from: str = None, date_to: str = None,
+                           limit: int = 500) -> list:
+        """按日期查询成交记录。"""
+        query = ("SELECT trade_date, trade_time, stockcode, side, quantity, price, amount "
+                 "FROM orders")
+        conditions = []
+        params = []
+        if date_str:
+            conditions.append("trade_date = ?")
+            params.append(date_str)
+        if date_from:
+            conditions.append("trade_date >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("trade_date <= ?")
+            params.append(date_to)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._get_conn().execute(query, params).fetchall()
+        return [{'time': f'{r[0]} {r[1]}' if r[1] else r[0],
+                 'stockcode': r[2], 'side': r[3],
+                 'quantity': r[4], 'price': r[5], 'amount': r[6]}
+                for r in rows]
 
     # ── 订单（追加） ──────────────────────────────────
 
