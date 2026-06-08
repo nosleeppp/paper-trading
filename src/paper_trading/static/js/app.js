@@ -337,8 +337,12 @@ function filterPaperTrades() {
 function populateTradeDates(trades) {
     const select = document.getElementById('paper-trade-filter');
     if (!select) return;
-    const dates = [...new Set(trades.map(t => (t.time || t.date || '').substring(0, 10)))].sort().reverse();
-    select.innerHTML = '<option value="">全部日期</option>' + dates.map(d => `<option value="${d}">${d}</option>`).join('');
+    const dates = [...new Set(trades.map(t => {
+        const ts = (t.time || t.date || '');
+        return ts.length >= 8 ? ts.substring(0, 8) : ts;
+    }))].filter(Boolean).sort().reverse();
+    select.innerHTML = '<option value="">全部日期</option>' +
+        dates.map(d => `<option value="${d}">${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}</option>`).join('');
 }
 
 function filterBtTrades() {

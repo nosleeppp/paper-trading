@@ -98,6 +98,38 @@ def update_paper_state(report: dict):
 # 异步回测 runner
 # ═══════════════════════════════════════════════════════════════════════
 
+def _load_strategy_module(module_name: str, pythonpath: str = None):
+    """加载策略模块（支持文件路径 / dotted path）。"""
+    import importlib.util as _util
+
+    mod = None
+    if module_name.endswith('.py'):
+        if os.path.isabs(module_name) and os.path.exists(module_name):
+            spec = _util.spec_from_file_location('_bt_strategy', module_name)
+            mod = _util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        elif pythonpath:
+            fpath = os.path.join(pythonpath, module_name)
+            if os.path.exists(fpath):
+                spec = _util.spec_from_file_location('_bt_strategy', fpath)
+                mod = _util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+
+    if mod is None:
+        try:
+            mod = __import__(module_name, fromlist=['*'])
+        except ImportError:
+            pass
+
+    if mod is None:
+        raise ImportError(
+            f"无法加载策略模块: {module_name}\n"
+            f"  PYTHONPATH={pythonpath}\n"
+            "  请确认文件路径正确，或使用「导入结果」模式。"
+        )
+    return mod
+
+
 def _run_backtest_async(task_id: str, start_date: str, end_date: str,
                         strategy_module: str = None, capital: float = 100_000_000,
                         pythonpath: str = None, data_dir: str = None):
@@ -144,6 +176,66 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
 
         data_cache = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
 
+        # ── 加载策略模块 ──
+        if not strategy_module:
+            raise ValueError(
+                "未指定策略模块。请在「策略模块路径」中填写策略文件的路径。"
+            )
+
+        mod = _load_strategy_module(strategy_module, pythonpath)
+        StrategyClass = None
+        for name in dir(mod):
+            obj = getattr(mod, name)
+            if (isinstance(obj, type) and hasattr(obj, 'initialize')
+                    and hasattr(obj, 'schedule_handler') and hasattr(obj, 'NAME')):
+                StrategyClass = obj
+                break
+        if StrategyClass is None:
+            raise ValueError(
+                f"在 {strategy_module} 中未找到策略类\n"
+                "策略类需有 initialize, schedule_handler, NAME 属性"
+            )
+
+        strategy = StrategyClass(data_dir=data_dir)
+
+        # ── 直接调用策略方法生成信号（不依赖 Backtester / factors_all 表）──
+        year_s, year_e = int(start_date[:4]), int(end_date[:4])
+        factor_df = strategy._load_factor_chunk(
+            data_cache, f'{year_s - 1}0101', f'{year_e}1231'
+        )
+        if factor_df is None or factor_df.empty:
+            raise RuntimeError(
+                f"因子数据为空 ({year_s - 1}~{year_e})。\n"
+                f"请检查 data_dir={data_dir} 中 factors_YYYY 年度表是否存在。"
+            )
+
+        # 填充 _factor_cache → _on_select → 提取信号
+        factor_cols = [c for c in factor_df.columns if c not in ('trade_date', 'ts_code')]
+        strategy._factor_cache = {}
+        for d, grp in factor_df.groupby('trade_date'):
+            strategy._factor_cache[str(d)] = grp.set_index('ts_code')[factor_cols]
+
+        # 模拟 context（只给 _on_select → _select 需要的属性）
+        class _BTMock:
+            def __init__(self, dc): self._data_cache = dc
+        ctx = type('_Ctx', (), {
+            'current_dt': end_date,
+            '_backtester': _BTMock(data_cache),
+        })()
+
+        # 对区间内每个交易日运行 _on_select，只取最后一天的结果
+        strategy._on_select(ctx)
+        targets = strategy._select_cache.get(end_date, [])
+        if isinstance(targets, tuple):
+            targets = list(targets[0])
+        elif not isinstance(targets, list):
+            targets = []
+
+        if not targets:
+            raise RuntimeError(f"_on_select({end_date}) 未产生信号")
+
+        # 用真实 Backtester 跑完整回测获取 nav/trades（此时因子缓存已就绪）
+        data_cache._precomputed_factor_cache = strategy._factor_cache
         bt = Backtester(
             start_date=start_date, end_date=end_date,
             initial_capital=capital, benchmark='000852.SH',
@@ -154,91 +246,10 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
             output_dir=output_dir, output_charts=False,
             data_cache=data_cache,
         )
-
-        # ── 加载策略模块（支持文件路径 / dotted path）──
-        if not strategy_module:
-            raise ValueError(
-                "未指定策略模块。请在「策略模块路径」中填写策略文件的路径。\n"
-                "例如: /root/lqq_bot_workspace/zz1000/strategies/v0/xxx.py\n"
-                "或 dotted path: zz1000.strategies.v0.xxx"
-            )
-
-        import importlib.util as _util
-
-        # 文件路径方式
-        mod = None
-        if strategy_module.endswith('.py'):
-            if os.path.isabs(strategy_module) and os.path.exists(strategy_module):
-                spec = _util.spec_from_file_location('_bt_strategy', strategy_module)
-                mod = _util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-            elif pythonpath:
-                fpath = os.path.join(pythonpath, strategy_module)
-                if os.path.exists(fpath):
-                    spec = _util.spec_from_file_location('_bt_strategy', fpath)
-                    mod = _util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-
-        # dotted import
-        if mod is None:
-            try:
-                mod = __import__(strategy_module, fromlist=['*'])
-            except ImportError:
-                pass
-
-        if mod is None:
-            raise ImportError(
-                f"无法加载策略模块: {strategy_module}\n"
-                f"  PYTHONPATH={pythonpath}\n"
-                "  请确认文件路径正确，或使用「导入结果」模式。"
-            )
-
-        # 查找策略类
-        strategy_loaded = False
-        for name in dir(mod):
-            obj = getattr(mod, name)
-            if (isinstance(obj, type) and hasattr(obj, 'initialize')
-                    and hasattr(obj, 'schedule_handler') and hasattr(obj, 'NAME')):
-                strategy = obj(data_dir=data_dir)
-                bt.set_strategies(
-                    initialize=strategy.initialize,
-                    schedule_handler=strategy.schedule_handler,
-                )
-                strategy_loaded = True
-                break
-
-        if not strategy_loaded:
-            raise ValueError(
-                f"在 {strategy_module} 中未找到策略类\n"
-                "策略类需有 initialize, schedule_handler, NAME 属性"
-            )
-
-        # 用策略自身的 _load_factor_chunk 预加载因子缓存
-        # 绕开 Backtester 内部 get_factors_all() 对 factors_all 表的依赖
-        try:
-            year_s = int(start_date[:4])
-            year_e = int(end_date[:4])
-            factor_df = strategy._load_factor_chunk(
-                data_cache,
-                f'{year_s - 1}0101',
-                f'{year_e}1231',
-            )
-            if factor_df is not None and not factor_df.empty:
-                strategy._factor_cache = {}
-                for d, grp in factor_df.groupby('trade_date'):
-                    strategy._factor_cache[str(d)] = grp.drop(
-                        columns=['trade_date', 'ts_code'], errors='ignore'
-                    )
-                # 标记为预计算缓存，Backtester.initialize 发现后会跳过 _preload_and_preprocess_all
-                data_cache._precomputed_factor_cache = strategy._factor_cache
-                _backtest_tasks[task_id].setdefault('_log', []).append(
-                    f"因子缓存预加载: {len(strategy._factor_cache)} 天"
-                )
-        except Exception as e:
-            _backtest_tasks[task_id].setdefault('_log', []).append(
-                f"因子预加载失败 (将使用 Backtester 内置加载): {e}"
-            )
-
+        bt.set_strategies(
+            initialize=strategy.initialize,
+            schedule_handler=strategy.schedule_handler,
+        )
         bt.run()
 
         stats = getattr(bt, 'stats', {}) or {}
