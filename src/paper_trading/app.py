@@ -389,42 +389,47 @@ def _parse_nav_xlsx(content: bytes) -> list:
 
 
 def _parse_summary_txt(content: bytes) -> dict:
-    """解析 收益概述.txt → account dict。"""
+    """解析 收益概述.txt → 完整指标 dict。"""
     text = content.decode('utf-8')
     result = {}
 
-    def _pct(s: str) -> float:
-        try:
-            return float(s.replace('%', '')) / 100
-        except ValueError:
-            return 0.0
+    def _pct(s):
+        try: return float(s.replace('%','')) / 100
+        except: return 0.0
+    def _num(s):
+        try: return float(s)
+        except: return 0.0
+    def _int(s):
+        try: return int(s)
+        except: return 0
 
-    def _num(s: str) -> float:
-        try:
-            return float(s)
-        except ValueError:
-            return 0.0
+    patterns = [
+        # 收益指标
+        ('total_return',      r'总收益率:\s*([\d\-.]+%)', _pct),
+        ('annual_return',     r'年化收益率:\s*([\d\-.]+%)', _pct),
+        ('benchmark_return',  r'基准收益率:\s*([\d\-.]+%)', _pct),
+        ('excess_return',     r'超额收益率:\s*([\d\-.]+%)', _pct),
+        ('annual_excess',     r'年化超额收益:\s*([\d\-.]+%)', _pct),
+        ('alpha',             r'Alpha:\s*([\d\-.]+)', _num),
+        ('beta',              r'Beta:\s*([\d\-.]+)', _num),
+        # 风险指标
+        ('volatility',        r'年化波动率:\s*([\d\-.]+%)', _pct),
+        ('sharpe',            r'夏普比率:\s*([\d\-.]+)', _num),
+        ('max_drawdown',      r'最大回撤:\s*([\d\-.]+%)', _pct),
+        ('tracking_error',    r'跟踪误差:\s*([\d\-.]+%)', _pct),
+        ('information_ratio', r'信息比率:\s*([\d\-.]+)', _num),
+        ('excess_sharpe',     r'超额夏普:\s*([\d\-.]+)', _num),
+        ('excess_max_dd',     r'超额最大回撤:\s*([\d\-.]+%)', _pct),
+        # 交易统计
+        ('win_rate',          r'胜率:\s*([\d\-.]+%)', _pct),
+        ('profit_loss_ratio', r'盈亏比:\s*([\d\-.]+)', _num),
+        ('trade_count',       r'交易次数:\s*(\d+)', _int),
+        # 区间
+        ('start_date',        r'回测区间:\s*(\d{8})\s*~', str),
+        ('end_date',          r'~\s*(\d{8})', str),
+    ]
 
-    patterns = {
-        'total_return': (r'总收益率:\s*([\d\-.]+%)', _pct),
-        'annual_return': (r'年化收益率:\s*([\d\-.]+%)', _pct),
-        'benchmark_return': (r'基准收益率:\s*([\d\-.]+%)', _pct),
-        'excess_return': (r'超额收益率:\s*([\d\-.]+%)', _pct),
-        'alpha': (r'Alpha:\s*([\d\-.]+)', _num),
-        'beta': (r'Beta:\s*([\d\-.]+)', _num),
-        'sharpe': (r'夏普比率:\s*([\d\-.]+)', _num),
-        'max_drawdown': (r'最大回撤:\s*([\d\-.]+%)', _pct),
-        'volatility': (r'年化波动率:\s*([\d\-.]+%)', _pct),
-        'tracking_error': (r'跟踪误差:\s*([\d\-.]+%)', _pct),
-        'information_ratio': (r'信息比率:\s*([\d\-.]+)', _num),
-        'win_rate': (r'胜率:\s*([\d\-.]+%)', _pct),
-        'profit_loss_ratio': (r'盈亏比:\s*([\d\-.]+)', _num),
-        'trade_count': (r'交易次数:\s*(\d+)', int),
-        'start_date': (r'回测区间:\s*(\d{8})\s*~', str),
-        'end_date': (r'~\s*(\d{8})', str),
-    }
-
-    for key, (pattern, converter) in patterns.items():
+    for key, pattern, converter in patterns:
         m = re.search(pattern, text)
         if m:
             result[key] = converter(m.group(1))
@@ -480,6 +485,29 @@ def _load_backtest_folder(folder: str) -> dict:
 
     # 回撤
     result['drawdown_series'] = _calc_drawdown(result['nav_series'])
+
+    # 基准净值
+    idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+    if idx_path and os.path.exists(idx_path):
+        try:
+            import pandas as pd
+            idx_df = pd.read_parquet(idx_path)
+            code_col = next((c for c in ['ts_code', 'code'] if c in idx_df.columns), idx_df.columns[1])
+            date_col = next((c for c in ['trade_date', 'date'] if c in idx_df.columns), idx_df.columns[0])
+            close_col = next((c for c in ['close', 'qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
+            bench = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+            if not bench.empty:
+                bench = bench.sort_values(date_col)
+                bench['ds'] = bench[date_col].astype(str).str[:8]
+                base_price = float(bench.iloc[0][close_col])
+                if base_price > 0:
+                    result['benchmark_nav'] = [
+                        {'date': str(r[date_col])[:10].replace('-',''),
+                         'nav': float(r[close_col]) / base_price}
+                        for _, r in bench.iterrows()
+                    ]
+        except Exception:
+            pass
 
     return result
 
@@ -605,8 +633,25 @@ def _run_realtime_loop(interval: int, flush_interval: int):
 
     logger = logging.getLogger(__name__)
     provider = SinaDataProvider()
+    # 基准净值：从 index_daily 读初始价格，后续用 Sina 实时价格计算
+    _bench_base_price = None
+    _bench_nav_series = []  # 基准净值序列（内存）
+    try:
+        idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+        if idx_path and os.path.exists(idx_path):
+            import pandas as _pd
+            _idf = _pd.read_parquet(idx_path)
+            code_col = next((c for c in ['ts_code','code'] if c in _idf.columns), _idf.columns[1])
+            _idf = _idf[_idf[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+            if not _idf.empty:
+                close_col = next((c for c in ['close','qfq_close'] if c in _idf.columns), _idf.columns[-1])
+                _bench_base_price = float(_idf.iloc[-1][close_col])  # 最新收盘价作为基准
+                logger.info("[Realtime] 基准初始价格: %.2f", _bench_base_price)
+    except Exception:
+        pass
+
     last_flush = 0
-    last_nav_date = ''  # 防止同一天重复写 nav
+    last_nav_date = ''
 
     # 启动时立即追加当日净值（如果 nav_series 还没有今天的记录）
     today_str = datetime.now().strftime('%Y%m%d')
@@ -666,6 +711,20 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                     _paper_state['account']['total_value'] = cash + total_mv
                     if init_cap > 0:
                         _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
+
+                    # 基准净值：取 000852.SH 实时价计算
+                    if _bench_base_price and _bench_base_price > 0:
+                        try:
+                            bench_tick = provider.get_tick('000852.SH')
+                            if bench_tick and bench_tick.last_price > 0:
+                                bm_nav = bench_tick.last_price / _bench_base_price
+                                today_str2 = datetime.now().strftime('%Y%m%d')
+                                bm_list = _paper_state.get('benchmark_nav', [])
+                                if not bm_list or bm_list[-1].get('date') != today_str2:
+                                    bm_list.append({'date': today_str2, 'nav': bm_nav})
+                                _paper_state['benchmark_nav'] = bm_list[-60:]  # 保留最近 60 点
+                        except Exception:
+                            pass
 
                     # 交易时段采集日内快照
                     now = datetime.now()

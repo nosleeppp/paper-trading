@@ -70,15 +70,37 @@ function updatePaperDashboard() {
     const acc = paperData.account || {};
     document.getElementById('total-value').textContent = fmtWan(acc.total_value);
     document.getElementById('capital').textContent = fmtWan(acc.capital);
+    document.getElementById('pos-count').textContent = acc.position_count || 0;
+    const posValue = (acc.total_value || 0) - (acc.capital || 0);
+    document.getElementById('pos-value').textContent = fmtWan(Math.max(posValue, 0));
     const retEl = document.getElementById('total-return');
     const ret = acc.total_return || 0;
     retEl.textContent = (ret * 100).toFixed(2) + '%';
     retEl.className = 'card-value ' + (ret >= 0 ? 'positive' : 'negative');
-    document.getElementById('pos-count').textContent = acc.position_count || 0;
+    // 附加快照指标
+    setIf('annual-return', acc.annual_return, 'pct');
+    setIf('bench-return', acc.benchmark_return, 'pct');
+    setIf('excess-return', acc.excess_return, 'pct');
+    setIf('sharpe', acc.sharpe, 'num2');
+    setIf('max-dd', acc.max_drawdown, 'pct');
+    setIf('excess-max-dd', acc.excess_max_dd, 'pct');
+    setIf('excess-sharpe', acc.excess_sharpe, 'num2');
+    setIf('alpha', acc.alpha, 'num4');
+    setIf('beta', acc.beta, 'num4');
+    setIf('win-rate', acc.win_rate, 'pct');
     updatePositionsTable(paperData.positions || [], 'positions-table');
     updateTradesTable(paperData.orders || [], 'trades-table');
     const benchmark = paperData.benchmark_nav || [];
     updateNavChart(paperData.pnl_curve || [], chartNavPaper, benchmark);
+}
+
+function setIf(id, val, fmt) {
+    const el = document.getElementById(id);
+    if (!el || val == null) return;
+    if (fmt === 'pct') el.textContent = (val * 100).toFixed(2) + '%';
+    else if (fmt === 'num2') el.textContent = val.toFixed(2);
+    else if (fmt === 'num4') el.textContent = val.toFixed(4);
+    else el.textContent = val;
 }
 
 // ══════════════════════════════════════════════════════
@@ -134,13 +156,18 @@ function updateBacktestDashboard() {
     retEl.textContent = (ret * 100).toFixed(2) + '%';
     retEl.className = 'card-value ' + (ret >= 0 ? 'positive' : 'negative');
 
-    document.getElementById('bt-annual').textContent = acc.annual_return ? (acc.annual_return * 100).toFixed(2) + '%' : '--';
-    document.getElementById('bt-sharpe').textContent = acc.sharpe ? acc.sharpe.toFixed(2) : '--';
-    document.getElementById('bt-dd').textContent = acc.max_drawdown ? (acc.max_drawdown * 100).toFixed(2) + '%' : '--';
-    document.getElementById('bt-alpha').textContent = acc.alpha ? acc.alpha.toFixed(4) : '--';
-    document.getElementById('bt-winrate').textContent = acc.win_rate ? (acc.win_rate * 100).toFixed(1) + '%' : '--';
+    document.getElementById('bt-annual').textContent = acc.annual_return != null ? (acc.annual_return * 100).toFixed(2) + '%' : '--';
+    document.getElementById('bt-bench').textContent = acc.benchmark_return != null ? (acc.benchmark_return * 100).toFixed(2) + '%' : '--';
+    document.getElementById('bt-excess').textContent = acc.excess_return != null ? (acc.excess_return * 100).toFixed(2) + '%' : '--';
+    document.getElementById('bt-sharpe').textContent = acc.sharpe != null ? acc.sharpe.toFixed(2) : '--';
+    document.getElementById('bt-dd').textContent = acc.max_drawdown != null ? (acc.max_drawdown * 100).toFixed(2) + '%' : '--';
+    document.getElementById('bt-excess-dd').textContent = acc.excess_max_dd != null ? (acc.excess_max_dd * 100).toFixed(2) + '%' : '--';
+    document.getElementById('bt-excess-sharpe').textContent = acc.excess_sharpe != null ? acc.excess_sharpe.toFixed(2) : '--';
+    document.getElementById('bt-alpha').textContent = acc.alpha != null ? acc.alpha.toFixed(4) : '--';
+    document.getElementById('bt-beta').textContent = acc.beta != null ? acc.beta.toFixed(4) : '--';
+    document.getElementById('bt-winrate').textContent = acc.win_rate != null ? (acc.win_rate * 100).toFixed(1) + '%' : '--';
 
-    updateNavChart(backtestData.nav_series || [], chartNavBt);
+    updateNavChart(backtestData.nav_series || [], chartNavBt, backtestData.benchmark_nav || []);
     updateDrawdownChart(backtestData.drawdown_series || []);
     updateTradesTable(backtestData.trades || [], 'bt-trades-table');
     populateBtTradeDates(backtestData.trades || []);

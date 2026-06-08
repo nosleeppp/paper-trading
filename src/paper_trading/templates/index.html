@@ -25,9 +25,20 @@
     <div id="tab-paper" class="tab-content active">
         <div class="summary-cards">
             <div class="card"><div class="card-label">总资产</div><div class="card-value" id="total-value">--</div></div>
+            <div class="card"><div class="card-label">持仓市值</div><div class="card-value" id="pos-value">--</div></div>
             <div class="card"><div class="card-label">可用资金</div><div class="card-value" id="capital">--</div></div>
-            <div class="card"><div class="card-label">累计收益</div><div class="card-value" id="total-return">--</div></div>
             <div class="card"><div class="card-label">持仓数</div><div class="card-value" id="pos-count">--</div></div>
+            <div class="card"><div class="card-label">累计收益</div><div class="card-value" id="total-return">--</div></div>
+            <div class="card"><div class="card-label">年化收益</div><div class="card-value" id="annual-return">--</div></div>
+            <div class="card"><div class="card-label">基准收益</div><div class="card-value" id="bench-return">--</div></div>
+            <div class="card"><div class="card-label">超额收益</div><div class="card-value" id="excess-return">--</div></div>
+            <div class="card"><div class="card-label">夏普比率</div><div class="card-value" id="sharpe">--</div></div>
+            <div class="card"><div class="card-label">最大回撤</div><div class="card-value" id="max-dd">--</div></div>
+            <div class="card"><div class="card-label">超额最大回撤</div><div class="card-value" id="excess-max-dd">--</div></div>
+            <div class="card"><div class="card-label">超额夏普</div><div class="card-value" id="excess-sharpe">--</div></div>
+            <div class="card"><div class="card-label">Alpha</div><div class="card-value" id="alpha">--</div></div>
+            <div class="card"><div class="card-label">Beta</div><div class="card-value" id="beta">--</div></div>
+            <div class="card"><div class="card-label">胜率</div><div class="card-value" id="win-rate">--</div></div>
         </div>
         <div class="main-grid single-col">
             <div class="panel"><h3>净值曲线</h3><div id="chart-nav-paper" class="chart-box"></div></div>
@@ -56,9 +67,14 @@
             <div class="summary-cards" id="bt-cards">
                 <div class="card"><div class="card-label">累计收益</div><div class="card-value" id="bt-return">--</div></div>
                 <div class="card"><div class="card-label">年化收益</div><div class="card-value" id="bt-annual">--</div></div>
+                <div class="card"><div class="card-label">基准收益</div><div class="card-value" id="bt-bench">--</div></div>
+                <div class="card"><div class="card-label">超额收益</div><div class="card-value" id="bt-excess">--</div></div>
                 <div class="card"><div class="card-label">夏普比率</div><div class="card-value" id="bt-sharpe">--</div></div>
                 <div class="card"><div class="card-label">最大回撤</div><div class="card-value" id="bt-dd">--</div></div>
+                <div class="card"><div class="card-label">超额最大回撤</div><div class="card-value" id="bt-excess-dd">--</div></div>
+                <div class="card"><div class="card-label">超额夏普</div><div class="card-value" id="bt-excess-sharpe">--</div></div>
                 <div class="card"><div class="card-label">Alpha</div><div class="card-value" id="bt-alpha">--</div></div>
+                <div class="card"><div class="card-label">Beta</div><div class="card-value" id="bt-beta">--</div></div>
                 <div class="card"><div class="card-label">胜率</div><div class="card-value" id="bt-winrate">--</div></div>
             </div>
 
