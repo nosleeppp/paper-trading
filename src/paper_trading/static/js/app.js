@@ -93,7 +93,8 @@ function updatePaperDashboard() {
     document.getElementById('pos-count').textContent = acc.position_count || 0;
     updatePositionsTable(paperData.positions || [], 'positions-table');
     updateTradesTable(paperData.orders || [], 'trades-table');
-    updateNavChart(paperData.pnl_curve || [], chartNavPaper);
+    const benchmark = paperData.benchmark_nav || [];
+    updateNavChart(paperData.pnl_curve || [], chartNavPaper, benchmark);
     updateIntradayChart(paperData.intraday || []);
 }
 
@@ -314,22 +315,30 @@ function updateTradesTable(trades, tableId) {
     if (!tbody) return;
     const isPaper = tableId === 'trades-table';
     tbody.innerHTML = trades.slice(-200).reverse().map(o => `
-        <tr data-date="${o.time || o.date || ''}" data-code="${o.stockcode || ''}">
+        <tr data-date="${(o.time || o.date || '').substring(0, 10)}" data-code="${o.stockcode || ''}">
             <td>${o.time || o.date || ''}</td><td>${o.stockcode || ''}</td>
             <td style="color:${o.side==='BUY'?'#e74c3c':'#27ae60'}">${o.side==='BUY'?'买入':'卖出'}</td>
             <td>${o.quantity || 0}</td><td>${(o.price || 0).toFixed(2)}</td>
             ${isPaper ? `<td>${fmtWan(o.amount || o.quantity * o.price)}</td>` : ''}
         </tr>
     `).join('');
+    // 填充日期下拉框
+    if (isPaper) populateTradeDates(trades);
 }
 
 function filterPaperTrades() {
     const filter = (document.getElementById('paper-trade-filter')?.value || '').toLowerCase();
     document.querySelectorAll('#trades-table tbody tr').forEach(row => {
         const d = (row.dataset.date || '').toLowerCase();
-        const c = (row.dataset.code || '').toLowerCase();
-        row.style.display = (!filter || d.includes(filter) || c.includes(filter)) ? '' : 'none';
+        row.style.display = (!filter || d.includes(filter)) ? '' : 'none';
     });
+}
+
+function populateTradeDates(trades) {
+    const select = document.getElementById('paper-trade-filter');
+    if (!select) return;
+    const dates = [...new Set(trades.map(t => (t.time || t.date || '').substring(0, 10)))].sort().reverse();
+    select.innerHTML = '<option value="">全部日期</option>' + dates.map(d => `<option value="${d}">${d}</option>`).join('');
 }
 
 function filterBtTrades() {
@@ -341,13 +350,33 @@ function filterBtTrades() {
     });
 }
 
-function updateNavChart(data, chart) {
+function updateNavChart(data, chart, benchmark) {
     if (!chart || !data.length) return;
+    const series = [{
+        name: '策略净值', type: 'line',
+        data: data.map(d => d.nav),
+        smooth: true, lineStyle: { color: '#2980b9', width: 2 },
+        areaStyle: { color: 'rgba(41,128,185,0.1)' },
+    }];
+    if (benchmark && benchmark.length) {
+        // 按日期对齐基准
+        const bmMap = {};
+        benchmark.forEach(b => { bmMap[b.date] = b.nav; });
+        const bmData = data.map(d => bmMap[d.date || d.time] || null);
+        series.push({
+            name: '中证1000', type: 'line',
+            data: bmData, smooth: true,
+            lineStyle: { color: '#95a5a6', width: 1.5, type: 'dashed' },
+            itemStyle: { color: '#95a5a6' },
+        });
+    }
     chart.setOption({
         tooltip: { trigger: 'axis' },
+        legend: { data: series.map(s => s.name), bottom: 0 },
+        grid: { left: '3%', right: '4%', bottom: '12%', top: '3%', containLabel: true },
         xAxis: { type: 'category', data: data.map(d => d.date || d.time || ''), axisLabel: { rotate: 30, fontSize: 10 } },
         yAxis: { type: 'value', axisLabel: { formatter: v => v.toFixed(2) } },
-        series: [{ name: '净值', type: 'line', data: data.map(d => d.nav), smooth: true, lineStyle: { color: '#2980b9', width: 2 }, areaStyle: { color: 'rgba(41,128,185,0.1)' } }],
+        series,
     }, true);
 }
 

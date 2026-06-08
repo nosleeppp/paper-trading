@@ -46,7 +46,7 @@ _realtime_running = False
 
 
 def update_paper_state(report: dict):
-    """由 engine 调用，写入实盘状态。"""
+    """由 engine 或 bootstrap 调用，写入实盘状态。"""
     _paper_state["account"] = {
         "capital": report.get("cash", 0),
         "total_value": report.get("total_value", 0),
@@ -72,13 +72,26 @@ def update_paper_state(report: dict):
          "amount": t.get("quantity", 0) * t.get("price", 0)}
         for t in report.get("trades", [])
     ]
-    _paper_state["pnl_curve"] = [
-        {"date": s.get("time", ""),
-         "nav": s.get("total_value", 0) / max(report.get("initial_capital", 1), 1)}
-        for s in report.get("minute_snapshots", [])
-    ]
+    # 净值曲线 — 优先从 nav_series 构建（完整历史），回退到 minute_snapshots
+    nav_src = report.get('nav_series', [])
+    if nav_src:
+        _paper_state["pnl_curve"] = [
+            {"date": n.get("date", ""), "nav": n.get("nav", 1)}
+            for n in nav_src
+        ]
+    else:
+        init_cap = report.get("initial_capital", 1)
+        _paper_state["pnl_curve"] = [
+            {"date": s.get("time", ""),
+             "nav": s.get("total_value", 0) / max(init_cap, 1)}
+            for s in report.get("minute_snapshots", [])
+        ]
     _paper_state["intraday"] = report.get("minute_snapshots", [])
     _paper_state["last_update"] = datetime.now().isoformat()
+    # 基准净值（如有）
+    bench = report.get("benchmark_nav", [])
+    if bench:
+        _paper_state["benchmark_nav"] = bench
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -198,6 +211,32 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
             raise ValueError(
                 f"在 {strategy_module} 中未找到策略类\n"
                 "策略类需有 initialize, schedule_handler, NAME 属性"
+            )
+
+        # 用策略自身的 _load_factor_chunk 预加载因子缓存
+        # 绕开 Backtester 内部 get_factors_all() 对 factors_all 表的依赖
+        try:
+            year_s = int(start_date[:4])
+            year_e = int(end_date[:4])
+            factor_df = strategy._load_factor_chunk(
+                data_cache,
+                f'{year_s - 1}0101',
+                f'{year_e}1231',
+            )
+            if factor_df is not None and not factor_df.empty:
+                strategy._factor_cache = {}
+                for d, grp in factor_df.groupby('trade_date'):
+                    strategy._factor_cache[str(d)] = grp.drop(
+                        columns=['trade_date', 'ts_code'], errors='ignore'
+                    )
+                # 标记为预计算缓存，Backtester.initialize 发现后会跳过 _preload_and_preprocess_all
+                data_cache._precomputed_factor_cache = strategy._factor_cache
+                _backtest_tasks[task_id].setdefault('_log', []).append(
+                    f"因子缓存预加载: {len(strategy._factor_cache)} 天"
+                )
+        except Exception as e:
+            _backtest_tasks[task_id].setdefault('_log', []).append(
+                f"因子预加载失败 (将使用 Backtester 内置加载): {e}"
             )
 
         bt.run()
@@ -497,6 +536,42 @@ def _register_routes(app):
         return jsonify({"success": True, "task_id": task_id,
                         "parsed": {"nav_days": len(nav_series), "trades": len(trades),
                                    "positions": len(positions), "account_keys": list(account.keys())}})
+
+    @app.route('/api/trade_dates')
+    def api_trade_dates():
+        """返回有成交记录的日期列表（供前端下拉框）。"""
+        if _realtime_store:
+            rows = _realtime_store._get_conn().execute(
+                "SELECT DISTINCT trade_date FROM orders ORDER BY trade_date DESC"
+            ).fetchall()
+            return jsonify([r[0] for r in rows])
+        return jsonify([])
+
+    @app.route('/api/benchmark')
+    def api_benchmark():
+        """返回基准净值序列。"""
+        paper_bench = _paper_state.get("benchmark_nav", [])
+        if paper_bench:
+            return jsonify(paper_bench)
+
+        # 尝试从 quant_backtest 获取
+        try:
+            from datetime import datetime as _dt
+            data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
+            from quant_backtest import DataCache
+            dc = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
+            today = _dt.now().strftime('%Y%m%d')
+            # 获取近30天基准净值
+            bench = []
+            for i in range(30, -1, -1):
+                d = (_dt.now() - __import__('datetime').timedelta(days=i)).strftime('%Y%m%d')
+                df = dc.get_index_daily('000852.SH', d)
+                if df is not None and len(df) > 0:
+                    val = float(df.iloc[0, 0]) if hasattr(df, 'iloc') else float(df)
+                    bench.append({'date': d, 'nav': val})
+            return jsonify(bench)
+        except Exception:
+            return jsonify([])
 
     @app.route('/api/backtest/list')
     def api_backtest_list():

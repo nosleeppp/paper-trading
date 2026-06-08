@@ -33,7 +33,7 @@
             <div class="panel"><h3>净值曲线</h3><div id="chart-nav-paper" class="chart-box"></div></div>
             <div class="panel"><h3>持仓明细</h3><div class="table-wrap"><table id="positions-table">
                 <thead><tr><th>代码</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏</th></tr></thead><tbody></tbody></table></div></div>
-            <div class="panel"><h3>成交记录 <input type="text" id="paper-trade-filter" placeholder="筛选日期/代码..." oninput="filterPaperTrades()" style="width:160px;margin-left:8px;padding:2px 8px;font-size:12px;"></h3><div class="table-wrap"><table id="trades-table">
+            <div class="panel"><h3>成交记录 <select id="paper-trade-filter" onchange="filterPaperTrades()" style="width:140px;margin-left:8px;padding:2px 8px;font-size:12px;"><option value="">全部日期</option></select></h3><div class="table-wrap"><table id="trades-table">
                 <thead><tr><th>时间</th><th>代码</th><th>方向</th><th>数量</th><th>价格</th><th>金额</th></tr></thead><tbody></tbody></table></div></div>
             <div class="panel"><h3>日内走势</h3><div id="chart-intraday" class="chart-box"></div></div>
         </div>
