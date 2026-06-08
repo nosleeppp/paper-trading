@@ -81,6 +81,7 @@ header h1 { font-size: 20px; }
     display: grid; grid-template-columns: 1fr 1fr;
     gap: 16px; padding: 0 24px 16px;
 }
+.main-grid.single-col { grid-template-columns: 1fr; }
 @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
 .panel {
     background: var(--card-bg); border-radius: 8px; padding: 16px;
