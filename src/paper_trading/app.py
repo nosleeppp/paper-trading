@@ -183,13 +183,23 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
             )
 
         mod = _load_strategy_module(strategy_module, pythonpath)
+
+        # 查策略类 — 排除基类 FactorStrategyTemplate
+        from quant_backtest.strategies import FactorStrategyTemplate
         StrategyClass = None
         for name in dir(mod):
             obj = getattr(mod, name)
-            if (isinstance(obj, type) and hasattr(obj, 'initialize')
-                    and hasattr(obj, 'schedule_handler') and hasattr(obj, 'NAME')):
-                StrategyClass = obj
-                break
+            if not isinstance(obj, type) or not hasattr(obj, 'NAME'):
+                continue
+            if obj is FactorStrategyTemplate:
+                continue
+            try:
+                if issubclass(obj, FactorStrategyTemplate):
+                    StrategyClass = obj
+                    break
+            except TypeError:
+                pass
+
         if StrategyClass is None:
             raise ValueError(
                 f"在 {strategy_module} 中未找到策略类\n"
@@ -662,7 +672,6 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                 live_ticks = provider.get_ticks_batch(_realtime_targets)
                 if live_ticks:
                     # 更新内存中的持仓价格
-                    updated = False
                     positions = _paper_state.get('positions', [])
                     for pos in positions:
                         code = pos.get('stockcode', '')
@@ -672,17 +681,37 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                             qty = pos.get('quantity', 0)
                             pos['market_value'] = qty * tick.last_price
                             pos['unrealized_pnl'] = qty * (tick.last_price - pos.get('avg_cost', 0))
-                            updated = True
 
-                    if updated:
-                        # 重算 total_value / total_return
-                        total_mv = sum(p.get('market_value', 0) for p in positions)
-                        cash = _paper_state['account'].get('capital', 0)
-                        init_cap = _paper_state['account'].get('initial_capital',
-                                     _paper_state['account'].get('capital', 0) + total_mv)
-                        _paper_state['account']['total_value'] = cash + total_mv
-                        if init_cap > 0:
-                            _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
+                    # 重算 total_value / total_return
+                    total_mv = sum(p.get('market_value', 0) for p in positions)
+                    cash = _paper_state['account'].get('capital', 0)
+                    init_cap = _paper_state['account'].get('initial_capital',
+                                 _paper_state['account'].get('capital', 0) + total_mv)
+                    _paper_state['account']['total_value'] = cash + total_mv
+                    if init_cap > 0:
+                        _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
+
+                    # 交易时段采集日内快照
+                    now = datetime.now()
+                    h, m = now.hour, now.minute
+                    in_session = ((h == 9 and m >= 30) or h == 10 or
+                                  (h == 11 and m <= 30) or (h >= 13 and h < 15))
+                    if in_session:
+                        intraday = _paper_state.get('intraday', [])
+                        if not intraday:
+                            _paper_state['intraday'] = []
+                        _paper_state['intraday'].append({
+                            'time': now.strftime('%H:%M:%S'),
+                            'capital': cash,
+                            'total_value': cash + total_mv,
+                            'positions': len(positions),
+                        })
+                        # 只保留当天的快照，且不超过 240 个点
+                        today = now.strftime('%Y-%m-%d')
+                        _paper_state['intraday'] = [
+                            s for s in _paper_state['intraday']
+                            if s.get('time', '').startswith(today[:4]) or today in str(s.get('time', ''))
+                        ][-240:]
 
                 # 每日收盘后追加净值（15:00 后写一次）
                 now = datetime.now()
