@@ -565,11 +565,14 @@ def _register_routes(app):
 
     @app.route('/api/strategies')
     def api_strategies():
-        """扫描文件系统返回可用策略文件列表。"""
+        """扫描文件系统返回可用策略文件列表。只返回包含策略类定义的 .py 文件。"""
         search_roots = [
             os.environ.get('PAPER_COLLAB_ROOT', '/root/lqq_bot_workspace'),
             '/root/lqq_bot_workspace',
         ]
+        # 策略类特征：import FactorStrategyTemplate 或 class NAME 或 _load_factor_chunk
+        STRATEGY_MARKERS = ('FactorStrategyTemplate', '_load_factor_chunk',
+                            'def _on_select', 'def schedule_handler')
         strategies = []
         seen = set()
         for root in search_roots:
@@ -580,19 +583,26 @@ def _register_routes(app):
                 if depth > 4:
                     dirs.clear(); continue
                 for f in sorted(files):
-                    if not f.endswith('.py') or f.startswith('_'):
-                        continue
-                    if 'factor' not in f.lower() and 'strategy' not in f.lower():
+                    if not f.endswith('.py') or f.startswith('_') or f.startswith('test'):
                         continue
                     full = os.path.join(dirpath, f)
                     rel = os.path.relpath(full, root)
-                    if rel not in seen:
-                        seen.add(rel)
-                        strategies.append({
-                            'name': f.replace('.py', ''),
-                            'path': full,
-                            'relpath': rel,
-                        })
+                    if rel in seen:
+                        continue
+                    # 内容验证：快速扫描文件确认包含策略类定义
+                    try:
+                        with open(full, 'r', encoding='utf-8', errors='ignore') as fh:
+                            head = fh.read(4096)  # 只读前 4KB
+                        if not any(m in head for m in STRATEGY_MARKERS):
+                            continue
+                    except Exception:
+                        continue
+                    seen.add(rel)
+                    strategies.append({
+                        'name': f.replace('.py', ''),
+                        'path': full,
+                        'relpath': rel,
+                    })
         return jsonify(strategies)
 
     @app.route('/api/trade_dates')
@@ -607,79 +617,44 @@ def _register_routes(app):
 
     @app.route('/api/benchmark')
     def api_benchmark():
-        """返回基准净值序列（归一化，首日=1.0）。"""
-        paper_bench = _paper_state.get("benchmark_nav", [])
-        if paper_bench:
-            return jsonify(paper_bench)
-
-        # 从 nav_series 获取日期范围，读 index_daily.parquet 计算净值
+        """
+        基准净值（000852.SH 中证1000），从 index_daily.parquet 直接读取。
+        归一化：以策略首日为 1.0。
+        不依赖 _realtime_store，纯文件读取。
+        """
         try:
             import pandas as pd
             data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
             idx_path = os.path.join(data_dir, 'index_daily.parquet')
             if not os.path.exists(idx_path):
-                # 回退：quant_backtest DataCache
-                return _benchmark_from_datacache()
+                return jsonify({'error': f'index_daily.parquet 不存在: {idx_path}'}), 404
+
             df = pd.read_parquet(idx_path)
-            bench = df[df['ts_code'].isin(['000852.SH', '000852'])]
+            # 列名可能是 trade_date/ts_code/close 或 date/code/close
+            date_col = next((c for c in ['trade_date', 'date'] if c in df.columns), df.columns[0])
+            code_col = next((c for c in ['ts_code', 'code'] if c in df.columns), df.columns[1])
+            close_col = next((c for c in ['close', 'qfq_close'] if c in df.columns), df.columns[-1])
+
+            bench = df[df[code_col].astype(str).str.replace('.SH', '').str.replace('.SZ', '') == '000852']
             if bench.empty:
-                return jsonify([])
+                return jsonify({'error': 'index_daily.parquet 中未找到 000852'}), 404
 
-            bench['date_str'] = bench['trade_date'].astype(str).str[:8]
-            prices = dict(zip(bench['date_str'], bench['close'].astype(float)))
+            bench = bench.sort_values(date_col)
+            bench['date_str'] = bench[date_col].astype(str).str[:8]
+            base_price = float(bench.iloc[0][close_col])
 
-            # 获取策略的净值日期范围
-            nav_dates = []
-            if _realtime_store:
-                rows = _realtime_store._get_conn().execute(
-                    "SELECT date FROM nav_series ORDER BY date"
-                ).fetchall()
-                nav_dates = [r[0].replace('-', '') for r in rows]
+            if base_price <= 0:
+                return jsonify({'error': '基准首日价格为0'}), 500
 
-            if not nav_dates:
-                return jsonify([])
-
-            base_price = None
             result = []
-            for d in nav_dates:
-                price = prices.get(d)
-                if price and price > 0:
-                    if base_price is None:
-                        base_price = price
-                    result.append({'date': d, 'nav': price / base_price})
-
+            for _, row in bench.iterrows():
+                result.append({
+                    'date': str(row[date_col])[:10].replace('-', ''),
+                    'nav': float(row[close_col]) / base_price,
+                })
             return jsonify(result)
-        except Exception:
-            return jsonify([])
-
-
-def _benchmark_from_datacache():
-    """回退：用 quant_backtest DataCache 获取基准。"""
-    try:
-        data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
-        from quant_backtest import DataCache
-        dc = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
-        nav_dates = []
-        if _realtime_store:
-            rows = _realtime_store._get_conn().execute(
-                "SELECT date FROM nav_series ORDER BY date"
-            ).fetchall()
-            nav_dates = [r[0].replace('-', '') for r in rows]
-        if not nav_dates:
-            return []
-        base_price = None
-        result = []
-        for d in nav_dates:
-            df = dc.get_index_daily('000852.SH', d)
-            if df is not None and len(df) > 0:
-                price = float(df.iloc[0, 0]) if hasattr(df, 'iloc') else float(df)
-                if base_price is None:
-                    base_price = price
-                if base_price and base_price > 0:
-                    result.append({'date': d, 'nav': price / base_price})
-        return result
-    except Exception:
-        return []
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/api/backtest/list')
     def api_backtest_list():
