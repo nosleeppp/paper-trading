@@ -198,7 +198,13 @@ function updateDrawdownChart(data) {
 function updatePositionsTable(positions, tableId) {
     const tbody = document.querySelector('#' + tableId + ' tbody');
     if (!tbody) return;
-    tbody.innerHTML = positions.map(p => {
+    // 按收益率降序
+    const sorted = [...positions].sort((a, b) => {
+        const ra = a.return_rate != null ? a.return_rate : ((a.price||0)-(a.avg_cost||0))/Math.max(a.avg_cost||0.01,0.01);
+        const rb = b.return_rate != null ? b.return_rate : ((b.price||0)-(b.avg_cost||0))/Math.max(b.avg_cost||0.01,0.01);
+        return rb - ra;
+    });
+    tbody.innerHTML = sorted.map(p => {
         const retRate = p.return_rate != null ? p.return_rate :
             ((p.price || 0) - (p.avg_cost || 0)) / Math.max(p.avg_cost || 0.01, 0.01);
         return `<tr><td>${p.stockcode || ''}</td><td>${p.quantity || 0}</td><td>${(p.avg_cost || 0).toFixed(2)}</td>

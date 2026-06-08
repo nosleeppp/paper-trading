@@ -480,6 +480,28 @@ def _load_backtest_folder(folder: str) -> dict:
             first = result['nav_series'][0] if result['nav_series'] else {}
             result['account']['total_return'] = (last.get('nav', 1) - 1.0) if last else 0
 
+    # 持仓记录
+    pos_path = os.path.join(folder, '持仓记录.csv')
+    if os.path.exists(pos_path):
+        pdf = pd.read_csv(pos_path, encoding='utf-8-sig')
+        pdf = pdf[pdf['品种'] != 'Cash']
+        if not pdf.empty:
+            last_date = pdf['日期'].max()
+            latest = pdf[pdf['日期'] == last_date]
+            for _, r in latest.iterrows():
+                code = str(r['标的'])
+                qty = int(float(str(r['数量']).replace('股', '')))
+                avg_cost = float(r['开仓均价'])
+                price = float(r['收盘价/结算价'])
+                mv = float(r['市值/价值'])
+                pnl = float(r['盈亏/逐笔浮盈'])
+                result['positions'].append({
+                    'stockcode': code, 'quantity': qty,
+                    'avg_cost': avg_cost, 'price': price,
+                    'market_value': mv, 'unrealized_pnl': pnl,
+                    'return_rate': (price - avg_cost) / max(avg_cost, 0.01),
+                })
+
     # 收益概述
     summary_path = os.path.join(folder, '收益概述.txt')
     if os.path.exists(summary_path):
