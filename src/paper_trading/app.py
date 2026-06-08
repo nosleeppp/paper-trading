@@ -512,6 +512,216 @@ def _load_backtest_folder(folder: str) -> dict:
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 完全复刻 quant_backtest 的绩效指标计算（不依赖 quant_backtest 包）
+# ═══════════════════════════════════════════════════════════════════════
+
+def _calc_trade_stats(trades_df):
+    """复刻 quant_backtest._calculate_trade_stats"""
+    import numpy as np
+    if trades_df is None or trades_df.empty:
+        return {'total_trades': 0, 'win_rate': 0.0, 'profit_loss_ratio': 0.0}
+
+    trades = trades_df.copy()
+    total_trades = len(trades)
+    profits, losses = [], []
+
+    if 'ts_code' in trades.columns and 'side' in trades.columns:
+        for ts_code in trades['ts_code'].unique():
+            stock_trades = trades[trades['ts_code'] == ts_code].sort_values('date')
+            buy_queue = []
+            for _, trade in stock_trades.iterrows():
+                action = str(trade.get('side', ''))
+                price = float(trade.get('price', 0))
+                qty = int(trade.get('quantity', 0))
+                commission = float(trade.get('commission', 0))
+                tax = float(trade.get('tax', 0))
+                if action.upper() == 'BUY':
+                    buy_queue.append((price, qty, commission))
+                elif action.upper() == 'SELL':
+                    sell_qty = qty
+                    sell_price = price
+                    total_cost, total_qty = 0.0, 0
+                    while sell_qty > 0 and buy_queue:
+                        buy_price, buy_qty, buy_comm = buy_queue[0]
+                        if buy_qty <= sell_qty:
+                            total_cost += buy_price * buy_qty + buy_comm
+                            total_qty += buy_qty
+                            sell_qty -= buy_qty
+                            buy_queue.pop(0)
+                        else:
+                            total_cost += buy_price * sell_qty + buy_comm * (sell_qty / buy_qty)
+                            total_qty += sell_qty
+                            buy_queue[0] = (buy_price, buy_qty - sell_qty,
+                                            buy_comm * (buy_qty - sell_qty) / buy_qty)
+                            sell_qty = 0
+                    if total_qty > 0:
+                        avg_cost = total_cost / total_qty
+                        pnl = sell_price * total_qty - total_cost - commission - tax
+                        if pnl > 0:
+                            profits.append(pnl)
+                        elif pnl < 0:
+                            losses.append(abs(pnl))
+
+    win_count = len(profits)
+    loss_count = len(losses)
+    total_closed = win_count + loss_count
+    win_rate = win_count / total_closed if total_closed > 0 else 0.0
+    avg_profit = np.mean(profits) if profits else 0
+    avg_loss = np.mean(losses) if losses else 0
+    profit_loss_ratio = avg_profit / avg_loss if avg_loss != 0 else 0.0
+    return {'total_trades': total_trades, 'win_rate': win_rate, 'profit_loss_ratio': profit_loss_ratio}
+
+
+def _calc_benchmark_metrics(daily_df, benchmark_data, strategy_daily_returns, risk_free_rate):
+    """复刻 quant_backtest._calculate_benchmark_metrics"""
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime as _dt
+
+    # 策略日期
+    sd = pd.to_datetime(daily_df['date'], format='%Y%m%d')
+    strategy_dates = sd.dt.normalize() if hasattr(sd, 'dt') else pd.DatetimeIndex(sd).normalize()
+    strategy_values = daily_df['total_value'].values
+    strategy_nav = pd.Series(strategy_values, index=strategy_dates)
+    strategy_nav = strategy_nav / strategy_nav.iloc[0]
+
+    # 基准日期
+    bd = pd.to_datetime(benchmark_data['trade_date'], format='%Y%m%d')
+    bench_dates = bd.dt.normalize() if hasattr(bd, 'dt') else pd.DatetimeIndex(bd).normalize()
+    if 'nav' in benchmark_data.columns:
+        bench_nav = pd.Series(benchmark_data['nav'].values, index=bench_dates)
+    else:
+        bench_nav = pd.Series(benchmark_data['close'].values, index=bench_dates)
+        bench_nav = bench_nav / bench_nav.iloc[0]
+
+    # 对齐
+    common = strategy_nav.index.intersection(bench_nav.index)
+    if len(common) == 0:
+        return {}
+    s_nav = strategy_nav.loc[common]
+    b_nav = bench_nav.loc[common]
+    total_days = len(common)
+
+    strategy_return = s_nav.iloc[-1] - 1
+    benchmark_return = b_nav.iloc[-1] - 1
+    strategy_annual_return = (1 + strategy_return) ** (252 / total_days) - 1 if total_days > 0 else 0
+    benchmark_annual_return = (1 + benchmark_return) ** (252 / total_days) - 1 if total_days > 0 else 0
+    excess_return = s_nav.iloc[-1] / b_nav.iloc[-1] - 1
+    excess_annual_return = (1 + excess_return) ** (252 / total_days) - 1 if total_days > 0 else 0
+
+    # 相对净值
+    relative_nav = s_nav / b_nav
+    cumulative_excess = relative_nav - 1
+    daily_excess_returns = relative_nav.pct_change().dropna()
+
+    # Alpha/Beta
+    rets_df = pd.DataFrame({'strategy': s_nav, 'benchmark': b_nav}).pct_change().dropna()
+    s_rets = rets_df['strategy']
+    b_rets = rets_df['benchmark']
+    if len(s_rets) > 1 and len(b_rets) > 1:
+        cov = np.cov(s_rets, b_rets)[0, 1]
+        b_var = np.var(b_rets)
+        beta = cov / b_var if b_var != 0 else 1.0
+    else:
+        beta = 1.0
+    alpha = strategy_annual_return - (risk_free_rate + beta * (benchmark_annual_return - risk_free_rate))
+
+    # 跟踪误差 / 信息比率
+    tracking_error = daily_excess_returns.std() * np.sqrt(252)
+    information_ratio = excess_annual_return / tracking_error if tracking_error != 0 else 0.0
+
+    # 超额最大回撤
+    excess_cummax = cumulative_excess.cummax()
+    excess_drawdown = (cumulative_excess - excess_cummax) / (1 + excess_cummax)
+    max_excess_drawdown = float(excess_drawdown.min())
+
+    # 超额夏普
+    excess_vol = daily_excess_returns.std() * np.sqrt(252)
+    excess_sharpe = excess_annual_return / excess_vol if excess_vol != 0 else 0.0
+
+    return {
+        'strategy_return': strategy_return,
+        'benchmark_return': benchmark_return,
+        'strategy_annual_return': strategy_annual_return,
+        'benchmark_annual_return': benchmark_annual_return,
+        'excess_return': excess_return,
+        'excess_annual_return': excess_annual_return,
+        'alpha': float(alpha), 'beta': float(beta),
+        'tracking_error': float(tracking_error),
+        'information_ratio': float(information_ratio),
+        'max_excess_drawdown': float(max_excess_drawdown),
+        'excess_sharpe_ratio': float(excess_sharpe),
+    }
+
+
+def _calc_performance_metrics(daily_df, trades_df=None, benchmark_data=None, risk_free_rate=0.018):
+    """复刻 quant_backtest.calculate_performance_metrics"""
+    import pandas as pd
+    import numpy as np
+
+    if daily_df.empty or 'total_value' not in daily_df.columns:
+        return {}
+
+    df = daily_df.copy()
+    df['total_value'] = df['total_value'].ffill().bfill()
+
+    total_days = len(df)
+    initial_value = float(df['total_value'].iloc[0])
+    final_value = float(df['total_value'].iloc[-1])
+
+    if pd.isna(initial_value) or pd.isna(final_value) or initial_value <= 0:
+        return {
+            'analysis_period_days': total_days,
+            'initial_capital': initial_value if not pd.isna(initial_value) else 0,
+            'final_capital': final_value if not pd.isna(final_value) else 0,
+            'total_return': 0.0, 'annual_return': 0.0,
+            'annual_volatility': 0.0, 'max_drawdown': 0.0,
+            'sharpe_ratio': 0.0, 'total_trades': 0,
+            'win_rate': 0.0, 'profit_loss_ratio': 0.0,
+        }
+
+    strategy_daily_returns = df['total_value'].pct_change().dropna()
+    total_return = (final_value - initial_value) / initial_value
+    annual_return = (1 + total_return) ** (252 / total_days) - 1 if total_days > 0 else 0
+    annual_volatility = float(strategy_daily_returns.std() * np.sqrt(252)) if len(strategy_daily_returns) > 0 else 0
+
+    cummax = df['total_value'].cummax()
+    drawdown = (df['total_value'] - cummax) / cummax
+    max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0
+
+    if annual_volatility != 0 and not np.isnan(annual_volatility) and not np.isinf(annual_volatility):
+        sharpe_ratio = (annual_return - risk_free_rate) / annual_volatility
+    else:
+        sharpe_ratio = 0.0
+
+    for v in ['total_return', 'annual_return', 'annual_volatility', 'max_drawdown', 'sharpe_ratio']:
+        val = locals()[v]
+        if np.isnan(val) or np.isinf(val):
+            locals()[v] = 0.0
+
+    trade_stats = _calc_trade_stats(trades_df)
+    benchmark_metrics = {}
+    if benchmark_data is not None and not benchmark_data.empty:
+        benchmark_metrics = _calc_benchmark_metrics(
+            daily_df, benchmark_data, strategy_daily_returns, risk_free_rate
+        )
+
+    metrics = {
+        'analysis_period_days': total_days,
+        'initial_capital': initial_value,
+        'final_capital': final_value,
+        'total_return': total_return,
+        'annual_return': annual_return,
+        'annual_volatility': annual_volatility,
+        'max_drawdown': max_drawdown,
+        'sharpe_ratio': sharpe_ratio,
+        **trade_stats,
+        **benchmark_metrics,
+    }
+    return metrics
+
+
 def _register_routes(app):
     @app.route('/')
     def index():
@@ -522,38 +732,34 @@ def _register_routes(app):
     @app.route('/api/paper/metrics')
     def api_paper_metrics():
         """
-        从 DB nav_series + index_daily.parquet 读取数据，
-        调用 quant_backtest.calculate_performance_metrics 计算完整指标。
+        完全复刻 quant_backtest.calculate_performance_metrics 的计算逻辑。
+        从 DB nav_series + index_daily.parquet 读取数据，用 numpy/pandas 计算。
         """
         try:
             import pandas as pd
+            import numpy as np
 
-            # 1. 从 store 读 nav_series → daily_df
             if not _realtime_store:
                 return jsonify({})
+
+            # ── 策略 daily_df ──
             nav_rows = _realtime_store._get_conn().execute(
-                "SELECT date, nav, total_value, cash, position_count, daily_return "
-                "FROM nav_series ORDER BY date"
+                "SELECT date, nav, total_value, cash FROM nav_series ORDER BY date"
             ).fetchall()
             if not nav_rows:
                 return jsonify({})
 
-            daily_df = pd.DataFrame(nav_rows, columns=[
-                'date', 'nav', 'total_value', 'cash', 'position_count', 'daily_return'
-            ])
+            daily_df = pd.DataFrame(nav_rows, columns=['date', 'nav', 'total_value', 'cash'])
 
-            # 2. 从 store 读 orders → trades_df
+            # ── 交易 trades_df ──
             order_rows = _realtime_store._get_conn().execute(
-                "SELECT trade_date, trade_time, stockcode, side, quantity, price, amount "
-                "FROM orders ORDER BY id"
+                "SELECT trade_date as date, stockcode as ts_code, side, quantity, price, 0 as commission, 0 as tax FROM orders ORDER BY id"
             ).fetchall()
-            trades_df = None
-            if order_rows:
-                trades_df = pd.DataFrame(order_rows, columns=[
-                    'trade_date', 'trade_time', 'stockcode', 'side', 'quantity', 'price', 'amount'
-                ])
+            trades_df = pd.DataFrame(order_rows, columns=[
+                'date', 'ts_code', 'side', 'quantity', 'price', 'commission', 'tax'
+            ]) if order_rows else None
 
-            # 3. 从 index_daily.parquet 读基准
+            # ── 基准 benchmark_data ──
             benchmark_data = None
             idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
             if idx_path and os.path.exists(idx_path):
@@ -564,16 +770,13 @@ def _register_routes(app):
                     date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
                     close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
                     benchmark_data = idx_df[[date_col, close_col]].copy()
-                    benchmark_data.columns = ['date', 'close']
-                    benchmark_data['date'] = benchmark_data['date'].astype(str).str[:8]
+                    benchmark_data.columns = ['trade_date', 'close']
+                    benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str[:8]
 
-            # 4. 调用 quant_backtest 计算指标
-            from quant_backtest import calculate_performance_metrics
-            metrics = calculate_performance_metrics(daily_df, trades_df, benchmark_data)
+            # ── 调用复刻版 calculate_performance_metrics ──
+            metrics = _calc_performance_metrics(daily_df, trades_df, benchmark_data)
             return jsonify(metrics)
 
-        except ImportError:
-            return jsonify({'error': 'quant_backtest 未安装，无法计算指标'})
         except Exception as e:
             return jsonify({'error': str(e)})
 
