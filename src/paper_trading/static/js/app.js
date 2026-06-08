@@ -16,8 +16,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(updateClock, 1000);
     fetchPaperStatus();
     setInterval(fetchPaperStatus, 5000);
-    fetchPaperMetrics();
-    setInterval(fetchPaperMetrics, 60000);  // 指标每分钟更新
     fetchBacktestYears();
     window.addEventListener('resize', resizeAllCharts);
 });
@@ -79,28 +77,24 @@ function updatePaperDashboard() {
     const ret = acc.total_return || 0;
     retEl.textContent = (ret * 100).toFixed(2) + '%';
     retEl.className = 'card-value ' + (ret >= 0 ? 'positive' : 'negative');
+
+    // 指标从 /api/status 的 metrics 字段读取
+    const m = paperData.metrics || {};
+    setIf('annual-return', m.annual_return, 'pct');
+    setIf('bench-return', m.benchmark_return, 'pct');
+    setIf('excess-return', m.excess_return, 'pct');
+    setIf('sharpe', m.sharpe_ratio, 'num2');
+    setIf('max-dd', m.max_drawdown, 'pct');
+    setIf('excess-max-dd', m.max_excess_drawdown, 'pct');
+    setIf('excess-sharpe', m.excess_sharpe_ratio, 'num2');
+    setIf('alpha', m.alpha, 'num4');
+    setIf('beta', m.beta, 'num4');
+    setIf('win-rate', m.win_rate, 'pct');
+
     updatePositionsTable(paperData.positions || [], 'positions-table');
     updateTradesTable(paperData.orders || [], 'trades-table');
     const benchmark = paperData.benchmark_nav || [];
     updateNavChart(paperData.pnl_curve || [], chartNavPaper, benchmark);
-}
-
-async function fetchPaperMetrics() {
-    try {
-        const resp = await fetch('/api/paper/metrics');
-        const m = await resp.json();
-        if (!m || m.error) return;
-        setIf('annual-return', m.annual_return, 'pct');
-        setIf('bench-return', m.benchmark_return, 'pct');
-        setIf('excess-return', m.excess_return, 'pct');
-        setIf('sharpe', m.sharpe_ratio, 'num2');
-        setIf('max-dd', m.max_drawdown, 'pct');
-        setIf('excess-max-dd', m.excess_max_dd, 'pct');
-        setIf('excess-sharpe', m.excess_sharpe, 'num2');
-        setIf('alpha', m.alpha, 'num4');
-        setIf('beta', m.beta, 'num4');
-        setIf('win-rate', m.win_rate, 'pct');
-    } catch (e) { /* ok */ }
 }
 
 function setIf(id, val, fmt) {
@@ -204,11 +198,14 @@ function updateDrawdownChart(data) {
 function updatePositionsTable(positions, tableId) {
     const tbody = document.querySelector('#' + tableId + ' tbody');
     if (!tbody) return;
-    tbody.innerHTML = positions.map(p => `
-        <tr><td>${p.stockcode || ''}</td><td>${p.quantity || 0}</td><td>${(p.avg_cost || 0).toFixed(2)}</td>
+    tbody.innerHTML = positions.map(p => {
+        const retRate = p.return_rate != null ? p.return_rate :
+            ((p.price || 0) - (p.avg_cost || 0)) / Math.max(p.avg_cost || 0.01, 0.01);
+        return `<tr><td>${p.stockcode || ''}</td><td>${p.quantity || 0}</td><td>${(p.avg_cost || 0).toFixed(2)}</td>
         <td>${(p.price || 0).toFixed(2)}</td><td>${fmtWan(p.market_value || 0)}</td>
-        <td style="color:${(p.unrealized_pnl||0)>=0?'#e74c3c':'#27ae60'}">${fmtWan(p.unrealized_pnl||0)}</td></tr>
-    `).join('');
+        <td style="color:${(p.unrealized_pnl||0)>=0?'#e74c3c':'#27ae60'}">${fmtWan(p.unrealized_pnl||0)}</td>
+        <td style="color:${retRate>=0?'#e74c3c':'#27ae60'}">${(retRate*100).toFixed(2)}%</td></tr>`;
+    }).join('');
 }
 
 function updateTradesTable(trades, tableId) {

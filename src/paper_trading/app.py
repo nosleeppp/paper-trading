@@ -62,6 +62,8 @@ def update_paper_state(report: dict):
             "price": p.get("market_value", 0) / max(p.get("quantity", 1), 1),
             "market_value": p.get("market_value", 0),
             "unrealized_pnl": p.get("unrealized_pnl", 0),
+            "return_rate": (p.get("market_value", 0) / max(p.get("quantity", 1), 1) - p.get("avg_cost", 0))
+                           / max(p.get("avg_cost", 0.01), 0.01),
         }
         for code, p in report.get("positions", {}).items()
     ]
@@ -722,6 +724,42 @@ def _calc_performance_metrics(daily_df, trades_df=None, benchmark_data=None, ris
     return metrics
 
 
+def _compute_paper_metrics() -> dict:
+    """从 DB 读取数据，用复刻的 _calc_performance_metrics 计算实盘指标。"""
+    import pandas as pd
+    nav_rows = _realtime_store._get_conn().execute(
+        "SELECT date, nav, total_value, cash FROM nav_series ORDER BY date"
+    ).fetchall()
+    if not nav_rows:
+        return {}
+
+    daily_df = pd.DataFrame(nav_rows, columns=['date', 'nav', 'total_value', 'cash'])
+
+    order_rows = _realtime_store._get_conn().execute(
+        "SELECT trade_date as date, stockcode as ts_code, side, quantity, price, 0 as commission, 0 as tax "
+        "FROM orders ORDER BY id"
+    ).fetchall()
+    trades_df = pd.DataFrame(order_rows, columns=[
+        'date', 'ts_code', 'side', 'quantity', 'price', 'commission', 'tax'
+    ]) if order_rows else None
+
+    benchmark_data = None
+    idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+    if idx_path and os.path.exists(idx_path):
+        import pandas as _pd
+        idx_df = _pd.read_parquet(idx_path)
+        code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
+        idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+        if not idx_df.empty:
+            date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
+            close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
+            benchmark_data = idx_df[[date_col, close_col]].copy()
+            benchmark_data.columns = ['trade_date', 'close']
+            benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str[:8]
+
+    return _calc_performance_metrics(daily_df, trades_df, benchmark_data)
+
+
 def _register_routes(app):
     @app.route('/')
     def index():
@@ -784,10 +822,17 @@ def _register_routes(app):
 
     @app.route('/api/status')
     def api_status():
+        metrics = {}
+        try:
+            if _realtime_store:
+                metrics = _compute_paper_metrics()
+        except Exception:
+            pass
         return jsonify({
             "date": datetime.now().strftime('%Y-%m-%d'),
             "time": datetime.now().strftime('%H:%M:%S'),
             **{k: v for k, v in _paper_state.items() if k != "last_update"},
+            "metrics": metrics,
         })
 
     @app.route('/api/paper/update', methods=['POST'])
@@ -965,6 +1010,7 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                             qty = pos.get('quantity', 0)
                             pos['market_value'] = qty * tick.last_price
                             pos['unrealized_pnl'] = qty * (tick.last_price - pos.get('avg_cost', 0))
+                            pos['return_rate'] = (tick.last_price - pos.get('avg_cost', 0)) / max(pos.get('avg_cost', 0.01), 0.01)
 
                     # 重算 total_value / total_return
                     total_mv = sum(p.get('market_value', 0) for p in positions)
