@@ -501,7 +501,13 @@ def _load_backtest_folder(folder: str) -> dict:
             if not bench.empty:
                 bench = bench.sort_values(date_col)
                 bench['ds'] = bench[date_col].astype(str).str[:8]
-                base_price = float(bench.iloc[0][close_col])
+                # 以 nav_series 第一个日期对应的基准价格为 1.0，确保起点对齐
+                first_strategy_date = result['nav_series'][0]['date'] if result['nav_series'] else ''
+                base_row = bench[bench['ds'] == first_strategy_date]
+                if not base_row.empty:
+                    base_price = float(base_row.iloc[0][close_col])
+                else:
+                    base_price = float(bench.iloc[0][close_col])
                 if base_price > 0:
                     result['benchmark_nav'] = [
                         {'date': str(r[date_col])[:10].replace('-','').replace('/',''),
