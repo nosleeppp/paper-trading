@@ -171,10 +171,16 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
                 f"  或使用「导入结果」模式上传回测输出文件。"
             ) from e
 
-        data_dir = data_dir or '/root/lqq_bot_workspace/data'
-        output_dir = os.path.join(os.path.dirname(data_dir), 'zz1000', 'output')
+        # 全部路径从环境变量或请求参数获取
+        data_dir = data_dir or os.environ.get('PAPER_DATA_DIR', '')
+        duckdb_path = os.environ.get('PAPER_DUCKDB_PATH',
+                                      os.path.join(data_dir, 'data.duckdb'))
+        output_dir = os.environ.get('PAPER_OUTPUT_DIR',
+                                     os.path.join(os.path.dirname(data_dir), 'output'))
+        if not data_dir:
+            raise ValueError("未设置 data_dir。请通过请求参数或环境变量 PAPER_DATA_DIR 指定。")
 
-        data_cache = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
+        data_cache = DataCache(data_dir=data_dir, duckdb_file=os.path.basename(duckdb_path))
 
         # ── 加载策略模块 ──
         if not strategy_module:
@@ -565,44 +571,35 @@ def _register_routes(app):
 
     @app.route('/api/strategies')
     def api_strategies():
-        """扫描文件系统返回可用策略文件列表。只返回包含策略类定义的 .py 文件。"""
-        search_roots = [
-            os.environ.get('PAPER_COLLAB_ROOT', '/root/lqq_bot_workspace'),
-            '/root/lqq_bot_workspace',
-        ]
-        # 策略类特征：import FactorStrategyTemplate 或 class NAME 或 _load_factor_chunk
+        """
+        扫描 PAPER_STRATEGY_SEARCH_DIR 下的策略文件。
+        只返回包含策略类定义的 .py 文件。
+        """
+        search_dir = os.environ.get('PAPER_STRATEGY_SEARCH_DIR', '')
+        if not search_dir or not os.path.isdir(search_dir):
+            return jsonify({'error': 'PAPER_STRATEGY_SEARCH_DIR 未设置或不存在'}), 404
+
         STRATEGY_MARKERS = ('FactorStrategyTemplate', '_load_factor_chunk',
                             'def _on_select', 'def schedule_handler')
         strategies = []
-        seen = set()
-        for root in search_roots:
-            if not os.path.isdir(root):
+        for f in sorted(os.listdir(search_dir)):
+            if not f.endswith('.py') or f.startswith('_') or f.startswith('test'):
                 continue
-            for dirpath, dirs, files in os.walk(root):
-                depth = dirpath.count(os.sep) - root.count(os.sep)
-                if depth > 4:
-                    dirs.clear(); continue
-                for f in sorted(files):
-                    if not f.endswith('.py') or f.startswith('_') or f.startswith('test'):
-                        continue
-                    full = os.path.join(dirpath, f)
-                    rel = os.path.relpath(full, root)
-                    if rel in seen:
-                        continue
-                    # 内容验证：快速扫描文件确认包含策略类定义
-                    try:
-                        with open(full, 'r', encoding='utf-8', errors='ignore') as fh:
-                            head = fh.read(4096)  # 只读前 4KB
-                        if not any(m in head for m in STRATEGY_MARKERS):
-                            continue
-                    except Exception:
-                        continue
-                    seen.add(rel)
-                    strategies.append({
-                        'name': f.replace('.py', ''),
-                        'path': full,
-                        'relpath': rel,
-                    })
+            full = os.path.join(search_dir, f)
+            if not os.path.isfile(full):
+                continue
+            try:
+                with open(full, 'r', encoding='utf-8', errors='ignore') as fh:
+                    head = fh.read(4096)
+                if not any(m in head for m in STRATEGY_MARKERS):
+                    continue
+            except Exception:
+                continue
+            strategies.append({
+                'name': f.replace('.py', ''),
+                'path': full,
+                'relpath': f,
+            })
         return jsonify(strategies)
 
     @app.route('/api/trade_dates')
@@ -618,16 +615,16 @@ def _register_routes(app):
     @app.route('/api/benchmark')
     def api_benchmark():
         """
-        基准净值（000852.SH 中证1000），从 index_daily.parquet 直接读取。
-        归一化：以策略首日为 1.0。
-        不依赖 _realtime_store，纯文件读取。
+        基准净值（000852.SH 中证1000），从 PAPER_INDEX_DAILY_PATH 读取。
+        归一化：以首日价格为 1.0。
         """
         try:
             import pandas as pd
-            data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
-            idx_path = os.path.join(data_dir, 'index_daily.parquet')
+            idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+            if not idx_path:
+                return jsonify({'error': 'PAPER_INDEX_DAILY_PATH 未设置。请在环境变量中指定 index_daily.parquet 路径。'}), 404
             if not os.path.exists(idx_path):
-                return jsonify({'error': f'index_daily.parquet 不存在: {idx_path}'}), 404
+                return jsonify({'error': f'文件不存在: {idx_path}'}), 404
 
             df = pd.read_parquet(idx_path)
             # 列名可能是 trade_date/ts_code/close 或 date/code/close
@@ -726,6 +723,34 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     provider = SinaDataProvider()
     last_flush = 0
     last_nav_date = ''  # 防止同一天重复写 nav
+
+    # 启动时立即追加当日净值（如果 nav_series 还没有今天的记录）
+    today_str = datetime.now().strftime('%Y%m%d')
+    try:
+        existing = _realtime_store._get_conn().execute(
+            "SELECT COUNT(*) FROM nav_series WHERE date=?", (today_str,)
+        ).fetchone()
+        if not existing or existing[0] == 0:
+            logger.info("[Realtime] 启动时追加当日净值: %s", today_str)
+            # 用当前 paper_state 计算
+            pos_list = _paper_state.get('positions', [])
+            total_mv = sum(p.get('market_value', 0) for p in pos_list)
+            cash = _paper_state['account'].get('capital', 0)
+            init_cap = _paper_state['account'].get('initial_capital', cash + total_mv)
+            tv = cash + total_mv
+            _realtime_store.append_nav({
+                'date': today_str,
+                'nav': tv / init_cap if init_cap > 0 else 1.0,
+                'total_value': tv, 'cash': cash,
+                'position_count': len(pos_list),
+                'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
+            })
+            _realtime_store.append_position_snapshot(today_str, {
+                p['stockcode']: p for p in pos_list
+            })
+            _realtime_store.flush()
+    except Exception as e:
+        logger.warning("[Realtime] 启动净值追加失败: %s", e)
 
     while _realtime_running:
         try:

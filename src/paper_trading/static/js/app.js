@@ -11,7 +11,7 @@ let backtestData = null;
 let currentTaskId = null;
 let pollTimer = null;
 
-let chartNavPaper, chartIntraday, chartNavBt, chartDDBt, chartCompare;
+let chartNavPaper, chartNavBt, chartDDBt, chartCompare;
 
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
@@ -54,14 +54,13 @@ function updateClock() {
 // ── Charts ──────────────────────────────────────────
 function initCharts() {
     chartNavPaper = echarts.init(document.getElementById('chart-nav-paper'));
-    chartIntraday = echarts.init(document.getElementById('chart-intraday'));
     chartNavBt = echarts.init(document.getElementById('chart-nav-bt'));
     chartDDBt = echarts.init(document.getElementById('chart-dd-bt'));
     chartCompare = echarts.init(document.getElementById('chart-compare'));
 }
 
 function resizeAllCharts() {
-    [chartNavPaper, chartIntraday, chartNavBt, chartDDBt, chartCompare].forEach(c => c?.resize());
+    [chartNavPaper, chartNavBt, chartDDBt, chartCompare].forEach(c => c?.resize());
 }
 
 // ── Tabs ────────────────────────────────────────────
@@ -110,7 +109,6 @@ function updatePaperDashboard() {
     updateTradesTable(paperData.orders || [], 'trades-table');
     const benchmark = paperData.benchmark_nav || [];
     updateNavChart(paperData.pnl_curve || [], chartNavPaper, benchmark);
-    updateIntradayChart(paperData.intraday || []);
 }
 
 // ══════════════════════════════════════════════════════
@@ -403,19 +401,6 @@ function updateNavChart(data, chart, benchmark) {
         xAxis: { type: 'category', data: data.map(d => d.date || d.time || ''), axisLabel: { rotate: 30, fontSize: 10 } },
         yAxis: { type: 'value', axisLabel: { formatter: v => v.toFixed(2) } },
         series,
-    }, true);
-}
-
-function updateIntradayChart(data) {
-    if (!chartIntraday || !data.length) return;
-    chartIntraday.setOption({
-        tooltip: { trigger: 'axis' },
-        xAxis: { type: 'category', data: data.map(d => d.time || ''), axisLabel: { rotate: 30, fontSize: 10 } },
-        yAxis: { type: 'value' },
-        series: [
-            { name: '总资产', type: 'line', data: data.map(d => d.total_value), smooth: true, lineStyle: { color: '#27ae60', width: 2 }, areaStyle: { color: 'rgba(39,174,96,0.1)' } },
-            { name: '可用资金', type: 'line', data: data.map(d => d.capital), smooth: true, lineStyle: { color: '#e67e22', width: 1, type: 'dashed' } },
-        ],
     }, true);
 }
 
