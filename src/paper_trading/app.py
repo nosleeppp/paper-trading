@@ -587,15 +587,17 @@ def _calc_benchmark_metrics(daily_df, benchmark_data, strategy_daily_returns, ri
     import pandas as pd
     from datetime import datetime as _dt
 
-    # 策略日期
-    sd = pd.to_datetime(daily_df['date'], format='%Y%m%d')
+    # 策略日期（兼容 YYYYMMDD 和 YYYY-MM-DD）
+    date_strs = daily_df['date'].astype(str).str.replace('-', '')
+    sd = pd.to_datetime(date_strs, format='%Y%m%d')
     strategy_dates = sd.dt.normalize() if hasattr(sd, 'dt') else pd.DatetimeIndex(sd).normalize()
     strategy_values = daily_df['total_value'].values
     strategy_nav = pd.Series(strategy_values, index=strategy_dates)
     strategy_nav = strategy_nav / strategy_nav.iloc[0]
 
-    # 基准日期
-    bd = pd.to_datetime(benchmark_data['trade_date'], format='%Y%m%d')
+    # 基准日期（兼容 YYYYMMDD 和 YYYY-MM-DD）
+    bd_strs = benchmark_data['trade_date'].astype(str).str.replace('-', '')
+    bd = pd.to_datetime(bd_strs, format='%Y%m%d')
     bench_dates = bd.dt.normalize() if hasattr(bd, 'dt') else pd.DatetimeIndex(bd).normalize()
     if 'nav' in benchmark_data.columns:
         bench_nav = pd.Series(benchmark_data['nav'].values, index=bench_dates)
@@ -740,6 +742,7 @@ def _compute_paper_metrics() -> dict:
         return {}
 
     daily_df = pd.DataFrame(nav_rows, columns=['date', 'nav', 'total_value', 'cash'])
+    daily_df['date'] = daily_df['date'].astype(str).str.replace('-', '')
 
     order_rows = _realtime_store._get_conn().execute(
         "SELECT trade_date as date, stockcode as ts_code, side, quantity, price, 0 as commission, 0 as tax "
