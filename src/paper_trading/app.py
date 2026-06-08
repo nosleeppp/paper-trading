@@ -829,17 +829,21 @@ def _register_routes(app):
     @app.route('/api/status')
     def api_status():
         metrics = {}
+        metrics_error = None
         try:
             if _realtime_store:
                 metrics = _compute_paper_metrics()
-        except Exception:
-            pass
-        return jsonify({
+        except Exception as e:
+            metrics_error = str(e)
+        result = {
             "date": datetime.now().strftime('%Y-%m-%d'),
             "time": datetime.now().strftime('%H:%M:%S'),
             **{k: v for k, v in _paper_state.items() if k != "last_update"},
             "metrics": metrics,
-        })
+        }
+        if metrics_error:
+            result["metrics_error"] = metrics_error
+        return jsonify(result)
 
     @app.route('/api/paper/update', methods=['POST'])
     def api_paper_update():
