@@ -860,10 +860,25 @@ def _register_routes(app):
                 metrics = _compute_paper_metrics()
         except Exception as e:
             metrics_error = str(e)
+
+        # 从 store 读取完整订单列表（包含 engine 后续成交）
+        orders = list(_paper_state.get("orders", []))
+        try:
+            if _realtime_store:
+                store_orders = _realtime_store.get_orders(limit=1000)
+                if store_orders:
+                    orders = store_orders
+        except Exception:
+            pass
+
         result = {
             "date": datetime.now().strftime('%Y-%m-%d'),
             "time": datetime.now().strftime('%H:%M:%S'),
-            **{k: v for k, v in _paper_state.items() if k != "last_update"},
+            "account": _paper_state.get("account", {}),
+            "positions": _paper_state.get("positions", []),
+            "orders": orders,
+            "pnl_curve": _paper_state.get("pnl_curve", []),
+            "benchmark_nav": _paper_state.get("benchmark_nav", []),
             "metrics": metrics,
         }
         if metrics_error:
@@ -1056,7 +1071,7 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                     if init_cap > 0:
                         _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
 
-                    # 基准净值：取 000852.SH 实时价计算
+                    # 基准净值：盘中实时覆盖当日值
                     if _bench_base_price and _bench_base_price > 0:
                         try:
                             bench_tick = provider.get_tick('000852.SH')
@@ -1064,9 +1079,12 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                                 bm_nav = bench_tick.last_price / _bench_base_price
                                 today_str2 = datetime.now().strftime('%Y%m%d')
                                 bm_list = _paper_state.get('benchmark_nav', [])
-                                if not bm_list or bm_list[-1].get('date') != today_str2:
+                                # 覆盖/追加当日条目
+                                if bm_list and bm_list[-1].get('date') == today_str2:
+                                    bm_list[-1]['nav'] = bm_nav  # 覆盖
+                                else:
                                     bm_list.append({'date': today_str2, 'nav': bm_nav})
-                                _paper_state['benchmark_nav'] = bm_list[-60:]  # 保留最近 60 点
+                                _paper_state['benchmark_nav'] = bm_list[-60:]
                         except Exception:
                             pass
 
