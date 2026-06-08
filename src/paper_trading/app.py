@@ -469,7 +469,7 @@ def _load_backtest_folder(folder: str) -> dict:
         tv_col = '总资产' if '总资产' in df.columns else df.columns[3]
         for _, r in df.iterrows():
             result['nav_series'].append({
-                'date': str(r[date_col])[:10].replace('/', '-'),
+                'date': str(r[date_col])[:10].replace('/', '').replace('-', ''),
                 'nav': float(r[nav_col]),
                 'total_value': float(r[tv_col]) if tv_col in df.columns else 0,
             })
@@ -502,7 +502,7 @@ def _load_backtest_folder(folder: str) -> dict:
                 base_price = float(bench.iloc[0][close_col])
                 if base_price > 0:
                     result['benchmark_nav'] = [
-                        {'date': str(r[date_col])[:10].replace('-',''),
+                        {'date': str(r[date_col])[:10].replace('-','').replace('/',''),
                          'nav': float(r[close_col]) / base_price}
                         for _, r in bench.iterrows()
                     ]
@@ -516,6 +516,66 @@ def _register_routes(app):
     @app.route('/')
     def index():
         return render_template('index.html')
+
+    # ── 实盘指标（用 quant_backtest 方法计算）─────────
+
+    @app.route('/api/paper/metrics')
+    def api_paper_metrics():
+        """
+        从 DB nav_series + index_daily.parquet 读取数据，
+        调用 quant_backtest.calculate_performance_metrics 计算完整指标。
+        """
+        try:
+            import pandas as pd
+
+            # 1. 从 store 读 nav_series → daily_df
+            if not _realtime_store:
+                return jsonify({})
+            nav_rows = _realtime_store._get_conn().execute(
+                "SELECT date, nav, total_value, cash, position_count, daily_return "
+                "FROM nav_series ORDER BY date"
+            ).fetchall()
+            if not nav_rows:
+                return jsonify({})
+
+            daily_df = pd.DataFrame(nav_rows, columns=[
+                'date', 'nav', 'total_value', 'cash', 'position_count', 'daily_return'
+            ])
+
+            # 2. 从 store 读 orders → trades_df
+            order_rows = _realtime_store._get_conn().execute(
+                "SELECT trade_date, trade_time, stockcode, side, quantity, price, amount "
+                "FROM orders ORDER BY id"
+            ).fetchall()
+            trades_df = None
+            if order_rows:
+                trades_df = pd.DataFrame(order_rows, columns=[
+                    'trade_date', 'trade_time', 'stockcode', 'side', 'quantity', 'price', 'amount'
+                ])
+
+            # 3. 从 index_daily.parquet 读基准
+            benchmark_data = None
+            idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+            if idx_path and os.path.exists(idx_path):
+                idx_df = pd.read_parquet(idx_path)
+                code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
+                idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+                if not idx_df.empty:
+                    date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
+                    close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
+                    benchmark_data = idx_df[[date_col, close_col]].copy()
+                    benchmark_data.columns = ['date', 'close']
+                    benchmark_data['date'] = benchmark_data['date'].astype(str).str[:8]
+
+            # 4. 调用 quant_backtest 计算指标
+            from quant_backtest import calculate_performance_metrics
+            metrics = calculate_performance_metrics(daily_df, trades_df, benchmark_data)
+            return jsonify(metrics)
+
+        except ImportError:
+            return jsonify({'error': 'quant_backtest 未安装，无法计算指标'})
+        except Exception as e:
+            return jsonify({'error': str(e)})
 
     # ── 实盘状态 ──────────────────────────────────────
 

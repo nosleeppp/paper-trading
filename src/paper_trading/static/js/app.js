@@ -16,6 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(updateClock, 1000);
     fetchPaperStatus();
     setInterval(fetchPaperStatus, 5000);
+    fetchPaperMetrics();
+    setInterval(fetchPaperMetrics, 60000);  // 指标每分钟更新
     fetchBacktestYears();
     window.addEventListener('resize', resizeAllCharts);
 });
@@ -77,21 +79,28 @@ function updatePaperDashboard() {
     const ret = acc.total_return || 0;
     retEl.textContent = (ret * 100).toFixed(2) + '%';
     retEl.className = 'card-value ' + (ret >= 0 ? 'positive' : 'negative');
-    // 附加快照指标
-    setIf('annual-return', acc.annual_return, 'pct');
-    setIf('bench-return', acc.benchmark_return, 'pct');
-    setIf('excess-return', acc.excess_return, 'pct');
-    setIf('sharpe', acc.sharpe, 'num2');
-    setIf('max-dd', acc.max_drawdown, 'pct');
-    setIf('excess-max-dd', acc.excess_max_dd, 'pct');
-    setIf('excess-sharpe', acc.excess_sharpe, 'num2');
-    setIf('alpha', acc.alpha, 'num4');
-    setIf('beta', acc.beta, 'num4');
-    setIf('win-rate', acc.win_rate, 'pct');
     updatePositionsTable(paperData.positions || [], 'positions-table');
     updateTradesTable(paperData.orders || [], 'trades-table');
     const benchmark = paperData.benchmark_nav || [];
     updateNavChart(paperData.pnl_curve || [], chartNavPaper, benchmark);
+}
+
+async function fetchPaperMetrics() {
+    try {
+        const resp = await fetch('/api/paper/metrics');
+        const m = await resp.json();
+        if (!m || m.error) return;
+        setIf('annual-return', m.annual_return, 'pct');
+        setIf('bench-return', m.benchmark_return, 'pct');
+        setIf('excess-return', m.excess_return, 'pct');
+        setIf('sharpe', m.sharpe_ratio, 'num2');
+        setIf('max-dd', m.max_drawdown, 'pct');
+        setIf('excess-max-dd', m.excess_max_dd, 'pct');
+        setIf('excess-sharpe', m.excess_sharpe, 'num2');
+        setIf('alpha', m.alpha, 'num4');
+        setIf('beta', m.beta, 'num4');
+        setIf('win-rate', m.win_rate, 'pct');
+    } catch (e) { /* ok */ }
 }
 
 function setIf(id, val, fmt) {
