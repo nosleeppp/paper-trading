@@ -23,7 +23,22 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', resizeAllCharts);
     const today = new Date();
     document.getElementById('bt-end').value = today.toISOString().split('T')[0];
+    fetchStrategies();
 });
+
+async function fetchStrategies() {
+    try {
+        const resp = await fetch('/api/strategies');
+        const strategies = await resp.json();
+        const select = document.getElementById('bt-strategy');
+        if (!select || !strategies.length) return;
+        select.innerHTML = strategies.map(s =>
+            `<option value="${s.path}">${s.relpath} (${s.name})</option>`
+        ).join('');
+    } catch (e) {
+        document.getElementById('bt-strategy').innerHTML = '<option value="">无法加载策略列表</option>';
+    }
+}
 
 // ── 时钟 ────────────────────────────────────────────
 function updateClock() {
@@ -106,10 +121,17 @@ async function runBacktest() {
     const endEl = document.getElementById('bt-end');
     const capitalEl = document.getElementById('bt-capital');
     const strategyEl = document.getElementById('bt-strategy');
-    const pythonpathEl = document.getElementById('bt-pythonpath');
-    const dataDirEl = document.getElementById('bt-data-dir');
     const statusEl = document.getElementById('bt-run-status');
     const progressEl = document.getElementById('bt-run-progress');
+
+    const strategyPath = strategyEl.value || '';
+    // auto-detect PYTHONPATH from strategy file path (parent of parent of zz1000/)
+    let pythonpath = '/root/lqq_bot_workspace';
+    if (strategyPath.includes('/strategies/')) {
+        pythonpath = strategyPath.split('/strategies/')[0];
+    } else if (strategyPath.includes('/zz1000/')) {
+        pythonpath = strategyPath.split('/zz1000/')[0];
+    }
 
     statusEl.textContent = '正在启动回测...';
     statusEl.className = 'status-msg running';
@@ -123,9 +145,9 @@ async function runBacktest() {
                 start_date: startEl.value.replace(/-/g, ''),
                 end_date: endEl.value.replace(/-/g, ''),
                 capital: parseFloat(capitalEl.value) * 10000,
-                strategy_module: strategyEl.value || null,
-                pythonpath: pythonpathEl.value || null,
-                data_dir: dataDirEl.value || null,
+                strategy_module: strategyPath,
+                pythonpath: pythonpath,
+                data_dir: pythonpath + '/data',
             }),
         });
         const data = await resp.json();

@@ -184,9 +184,10 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
 
         mod = _load_strategy_module(strategy_module, pythonpath)
 
-        # 查策略类 — 排除基类 FactorStrategyTemplate
+        # 查策略类 — 排除基类/配置类，取覆盖了 _load_factor_chunk 的最深层子类
         from quant_backtest.strategies import FactorStrategyTemplate
-        StrategyClass = None
+        base_load = FactorStrategyTemplate._load_factor_chunk
+        candidates = []
         for name in dir(mod):
             obj = getattr(mod, name)
             if not isinstance(obj, type) or not hasattr(obj, 'NAME'):
@@ -194,11 +195,15 @@ def _run_backtest_async(task_id: str, start_date: str, end_date: str,
             if obj is FactorStrategyTemplate:
                 continue
             try:
-                if issubclass(obj, FactorStrategyTemplate):
-                    StrategyClass = obj
-                    break
+                if not issubclass(obj, FactorStrategyTemplate):
+                    continue
             except TypeError:
-                pass
+                continue
+            if getattr(obj, '_load_factor_chunk', base_load) is base_load:
+                continue
+            candidates.append(obj)
+
+        StrategyClass = max(candidates, key=lambda c: len(c.__mro__)) if candidates else None
 
         if StrategyClass is None:
             raise ValueError(
@@ -558,6 +563,38 @@ def _register_routes(app):
                         "parsed": {"nav_days": len(nav_series), "trades": len(trades),
                                    "positions": len(positions), "account_keys": list(account.keys())}})
 
+    @app.route('/api/strategies')
+    def api_strategies():
+        """扫描文件系统返回可用策略文件列表。"""
+        search_roots = [
+            os.environ.get('PAPER_COLLAB_ROOT', '/root/lqq_bot_workspace'),
+            '/root/lqq_bot_workspace',
+        ]
+        strategies = []
+        seen = set()
+        for root in search_roots:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, dirs, files in os.walk(root):
+                depth = dirpath.count(os.sep) - root.count(os.sep)
+                if depth > 4:
+                    dirs.clear(); continue
+                for f in sorted(files):
+                    if not f.endswith('.py') or f.startswith('_'):
+                        continue
+                    if 'factor' not in f.lower() and 'strategy' not in f.lower():
+                        continue
+                    full = os.path.join(dirpath, f)
+                    rel = os.path.relpath(full, root)
+                    if rel not in seen:
+                        seen.add(rel)
+                        strategies.append({
+                            'name': f.replace('.py', ''),
+                            'path': full,
+                            'relpath': rel,
+                        })
+        return jsonify(strategies)
+
     @app.route('/api/trade_dates')
     def api_trade_dates():
         """返回有成交记录的日期列表（供前端下拉框）。"""
@@ -570,29 +607,79 @@ def _register_routes(app):
 
     @app.route('/api/benchmark')
     def api_benchmark():
-        """返回基准净值序列。"""
+        """返回基准净值序列（归一化，首日=1.0）。"""
         paper_bench = _paper_state.get("benchmark_nav", [])
         if paper_bench:
             return jsonify(paper_bench)
 
-        # 尝试从 quant_backtest 获取
+        # 从 nav_series 获取日期范围，读 index_daily.parquet 计算净值
         try:
-            from datetime import datetime as _dt
+            import pandas as pd
             data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
-            from quant_backtest import DataCache
-            dc = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
-            today = _dt.now().strftime('%Y%m%d')
-            # 获取近30天基准净值
-            bench = []
-            for i in range(30, -1, -1):
-                d = (_dt.now() - __import__('datetime').timedelta(days=i)).strftime('%Y%m%d')
-                df = dc.get_index_daily('000852.SH', d)
-                if df is not None and len(df) > 0:
-                    val = float(df.iloc[0, 0]) if hasattr(df, 'iloc') else float(df)
-                    bench.append({'date': d, 'nav': val})
-            return jsonify(bench)
+            idx_path = os.path.join(data_dir, 'index_daily.parquet')
+            if not os.path.exists(idx_path):
+                # 回退：quant_backtest DataCache
+                return _benchmark_from_datacache()
+            df = pd.read_parquet(idx_path)
+            bench = df[df['ts_code'].isin(['000852.SH', '000852'])]
+            if bench.empty:
+                return jsonify([])
+
+            bench['date_str'] = bench['trade_date'].astype(str).str[:8]
+            prices = dict(zip(bench['date_str'], bench['close'].astype(float)))
+
+            # 获取策略的净值日期范围
+            nav_dates = []
+            if _realtime_store:
+                rows = _realtime_store._get_conn().execute(
+                    "SELECT date FROM nav_series ORDER BY date"
+                ).fetchall()
+                nav_dates = [r[0].replace('-', '') for r in rows]
+
+            if not nav_dates:
+                return jsonify([])
+
+            base_price = None
+            result = []
+            for d in nav_dates:
+                price = prices.get(d)
+                if price and price > 0:
+                    if base_price is None:
+                        base_price = price
+                    result.append({'date': d, 'nav': price / base_price})
+
+            return jsonify(result)
         except Exception:
             return jsonify([])
+
+
+def _benchmark_from_datacache():
+    """回退：用 quant_backtest DataCache 获取基准。"""
+    try:
+        data_dir = os.environ.get('PAPER_DATA_DIR', '/root/lqq_bot_workspace/data')
+        from quant_backtest import DataCache
+        dc = DataCache(data_dir=data_dir, duckdb_file='data.duckdb')
+        nav_dates = []
+        if _realtime_store:
+            rows = _realtime_store._get_conn().execute(
+                "SELECT date FROM nav_series ORDER BY date"
+            ).fetchall()
+            nav_dates = [r[0].replace('-', '') for r in rows]
+        if not nav_dates:
+            return []
+        base_price = None
+        result = []
+        for d in nav_dates:
+            df = dc.get_index_daily('000852.SH', d)
+            if df is not None and len(df) > 0:
+                price = float(df.iloc[0, 0]) if hasattr(df, 'iloc') else float(df)
+                if base_price is None:
+                    base_price = price
+                if base_price and base_price > 0:
+                    result.append({'date': d, 'nav': price / base_price})
+        return result
+    except Exception:
+        return []
 
     @app.route('/api/backtest/list')
     def api_backtest_list():
