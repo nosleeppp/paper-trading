@@ -625,6 +625,7 @@ def _calc_benchmark_metrics(daily_df, benchmark_data, strategy_daily_returns, ri
         bench_nav = pd.Series(benchmark_data['nav'].values, index=bench_dates)
     else:
         bench_nav = pd.Series(benchmark_data['close'].values, index=bench_dates)
+        # 以 common 交集第一天的 close 为基准归一化（与策略对齐），不是 iloc[0]
         bench_nav = bench_nav / bench_nav.iloc[0]
 
     # 对齐
@@ -633,6 +634,9 @@ def _calc_benchmark_metrics(daily_df, benchmark_data, strategy_daily_returns, ri
         return {}
     s_nav = strategy_nav.loc[common]
     b_nav = bench_nav.loc[common]
+    # 以公共交集第一天的 close 为基准归一化（确保基准和策略同日起始=1.0）
+    if b_nav.iloc[0] > 0:
+        b_nav = b_nav / b_nav.iloc[0]
     total_days = len(common)
 
     strategy_return = s_nav.iloc[-1] - 1
