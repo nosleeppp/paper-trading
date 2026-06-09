@@ -195,9 +195,10 @@ class PaperStore:
         return row[0] if row else 0
 
     def append_position_snapshot(self, date_str: str, positions: dict) -> None:
-        """追加持仓快照（不覆盖历史）。"""
+        """追加持仓快照（不覆盖历史）。日期自动归一化。"""
         if not positions:
             return
+        d = str(date_str).replace('-', '')[:8]
         with self._lock:
             conn = self._get_conn()
             for code, p in positions.items():
@@ -207,7 +208,7 @@ class PaperStore:
                     "INSERT OR REPLACE INTO position_snapshots "
                     "(date, stockcode, quantity, price, market_value) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (date_str, code, qty, price, qty * price),
+                    (d, code, qty, price, qty * price),
                 )
             conn.commit()
 
@@ -303,15 +304,16 @@ class PaperStore:
     def append_nav(self, record: dict) -> None:
         """
         追加一条净值记录（每天一条，同日期覆盖）。
-        record: {date, nav, total_value, cash, position_count, daily_return}
+        日期自动归一化为 YYYYMMDD。
         """
+        d = str(record.get('date', '')).replace('-', '')[:8]
         with self._lock:
             conn = self._get_conn()
             conn.execute(
                 "INSERT OR REPLACE INTO nav_series "
                 "(date, nav, total_value, cash, position_count, daily_return) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (str(record.get('date', '')),
+                (d,
                  float(record.get('nav', 0)),
                  float(record.get('total_value', 0)),
                  float(record.get('cash', 0)),
