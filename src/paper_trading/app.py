@@ -919,13 +919,20 @@ def _register_routes(app):
         except Exception as e:
             metrics_error = str(e)
 
-        # 从 store 读取完整订单列表（包含 engine 后续成交）
+        # 从 store 读取订单 + 净值曲线（DB 是唯一真相源）
         orders = list(_paper_state.get("orders", []))
+        pnl_curve = list(_paper_state.get("pnl_curve", []))
         try:
             if _realtime_store:
                 store_orders = _realtime_store.get_orders(limit=1000)
                 if store_orders:
                     orders = store_orders
+                # pnl_curve 从 DB nav_series 构建（backtest历史 + realtime更新）
+                nav_rows = _realtime_store._get_conn().execute(
+                    "SELECT date, nav FROM nav_series ORDER BY date"
+                ).fetchall()
+                if nav_rows:
+                    pnl_curve = [{'date': r[0], 'nav': r[1]} for r in nav_rows]
         except Exception:
             pass
 
@@ -935,7 +942,7 @@ def _register_routes(app):
             "account": _paper_state.get("account", {}),
             "positions": _paper_state.get("positions", []),
             "orders": orders,
-            "pnl_curve": _paper_state.get("pnl_curve", []),
+            "pnl_curve": pnl_curve,
             "benchmark_nav": _paper_state.get("benchmark_nav", []),
             "metrics": metrics,
         }

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.12.0] - 2026-06-09
+
+### Fixed
+- pnl_curve 数据源从 backtest xlsx 改为 DB nav_series（包含 backtest 历史 + realtime 实时更新）
+- 基准计算链彻底重写：归一化基数对齐策略起始日、benchmark_data 过滤到策略日期范围
+- 重启时不覆盖 realtime 数据：nav_series 只插入不覆盖、从 store 恢复 _paper_state
+- 日期格式全链路统一 YYYYMMDD
+- 所有路径可配置：index_daily/daily_qfq/duckdb/strategy 均通过 config.json 或环境变量
+
+### Added
+- SQLite 持久化：PaperStore (account/positions/orders/nav_series/signals 5 表)
+- 实时更新循环：每 60s 拉行情，每 5min flush DB，每日 15:00 后追加净值
+- 复刻 quant_backtest 绩效指标计算：_calc_performance_metrics / _calc_benchmark_metrics / _calc_trade_stats
+- systemd 部署：paper-trading.service + waitress 生产服务器
+- 回测分析 Tab：本地文件夹加载 + 年度下拉框
+
 ## [0.4.0] - 2026-06-05
 
 ### Changed
