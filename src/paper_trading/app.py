@@ -807,29 +807,39 @@ def _compute_paper_metrics() -> dict:
             close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
             benchmark_data = idx_df[[date_col, close_col]].copy()
             benchmark_data.columns = ['trade_date', 'close']
-            benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str[:8]
+            benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
+            # 只保留策略日期范围内的基准数据
+            strategy_dates = set(daily_df['date'].unique())
+            benchmark_data = benchmark_data[benchmark_data['trade_date'].isin(strategy_dates)]
 
-    # 合并实时基准数据（归一化日期为 YYYYMMDD 后再匹配）
+    # 合并实时基准：用 realtime loop 获取的当日价格
     live_bm = _paper_state.get('benchmark_nav', [])
     if live_bm and benchmark_data is not None and not benchmark_data.empty:
         import pandas as _pd
-        # 归一化 benchmark_data 的日期
         benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
-        base_price = float(benchmark_data.iloc[0]['close'])
-        if base_price > 0:
-            for item in live_bm:
-                d = str(item.get('date', '')).replace('-', '')[:8]
-                nav = item.get('nav', 0)
-                if d and nav > 0:
-                    price = nav * base_price
-                    existing = benchmark_data[benchmark_data['trade_date'] == d]
-                    if not existing.empty:
-                        benchmark_data.loc[existing.index[0], 'close'] = price
+        for item in live_bm[-1:]:  # 只取最后一条（当日实时）
+            d = str(item.get('date', '')).replace('-', '')[:8]
+            if d and d not in set(benchmark_data['trade_date']):
+                # 当日未在 parquet 中：用实时价格追加
+                # 以 parquet 最后一天的 close 为基准，乘以实时 nav 反推 close
+                last_close = float(benchmark_data.iloc[-1]['close'])
+                bm_nav_val = item.get('nav', 0)
+                if bm_nav_val > 0 and last_close > 0:
+                    # 基准的 nav 已经是 close/strategy_start_close 归一化
+                    # 所以 close = nav * strategy_start_close
+                    # strategy_start_close = last_close / last_nav
+                    # 但更简单：直接用实时价格
+                    # 实时价格 = _bench_base_price * bm_nav_val
+                    if _bench_base_price and _bench_base_price > 0:
+                        today_close = _bench_base_price * bm_nav_val
                     else:
-                        benchmark_data = _pd.concat([
-                            benchmark_data,
-                            _pd.DataFrame([{'trade_date': d, 'close': price}])
-                        ], ignore_index=True)
+                        today_close = last_close * (bm_nav_val / (float(benchmark_data.iloc[-2]['close']) / _bench_base_price if len(benchmark_data) >= 2 and _bench_base_price else 1))
+                        if today_close <= 0:
+                            continue
+                    benchmark_data = _pd.concat([
+                        benchmark_data,
+                        _pd.DataFrame([{'trade_date': d, 'close': today_close}])
+                    ], ignore_index=True)
 
     return _calc_performance_metrics(daily_df, trades_df, benchmark_data)
 
@@ -1034,20 +1044,37 @@ def _run_realtime_loop(interval: int, flush_interval: int):
 
     logger = logging.getLogger(__name__)
     provider = SinaDataProvider()
-    # 基准净值：从 index_daily 读初始价格，后续用 Sina 实时价格计算
+    # 基准净值：从 store nav_series 第一天的 index_daily close 作为归一化基数
     _bench_base_price = None
-    _bench_nav_series = []  # 基准净值序列（内存）
     try:
-        idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
-        if idx_path and os.path.exists(idx_path):
+        # 取策略起始日
+        first_nav = _realtime_store._get_conn().execute(
+            "SELECT date FROM nav_series ORDER BY date LIMIT 1"
+        ).fetchone()
+        strategy_start_date = str(first_nav[0]).replace('-', '')[:8] if first_nav else ''
+
+        idx_path = _resolve_index_daily_path()
+        if idx_path and strategy_start_date:
             import pandas as _pd
             _idf = _pd.read_parquet(idx_path)
             code_col = next((c for c in ['ts_code','code'] if c in _idf.columns), _idf.columns[1])
+            date_col = next((c for c in ['trade_date','date'] if c in _idf.columns), _idf.columns[0])
+            close_col = next((c for c in ['close','qfq_close'] if c in _idf.columns), _idf.columns[-1])
             _idf = _idf[_idf[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
-            if not _idf.empty:
-                close_col = next((c for c in ['close','qfq_close'] if c in _idf.columns), _idf.columns[-1])
-                _bench_base_price = float(_idf.iloc[-1][close_col])  # 最新收盘价作为基准
-                logger.info("[Realtime] 基准初始价格: %.2f", _bench_base_price)
+            _idf['ds'] = _idf[date_col].astype(str).str[:8]
+            start_row = _idf[_idf['ds'] == strategy_start_date]
+            if not start_row.empty:
+                _bench_base_price = float(start_row.iloc[0][close_col])
+                logger.info("[Realtime] 基准基数: %.2f (策略起始日 %s)", _bench_base_price, strategy_start_date)
+            elif not _idf.empty:
+                # 回退：策略起始日前最近一个交易日
+                _idf_sorted = _idf.sort_values('ds')
+                before = _idf_sorted[_idf_sorted['ds'] <= strategy_start_date]
+                if not before.empty:
+                    _bench_base_price = float(before.iloc[-1][close_col])
+                else:
+                    _bench_base_price = float(_idf_sorted.iloc[0][close_col])
+                logger.info("[Realtime] 基准基数(回退): %.2f", _bench_base_price)
     except Exception:
         pass
 
