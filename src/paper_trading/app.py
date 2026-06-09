@@ -788,19 +788,19 @@ def _compute_paper_metrics() -> dict:
             benchmark_data.columns = ['trade_date', 'close']
             benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str[:8]
 
-    # 合并实时基准数据（_paper_state['benchmark_nav'] 盘中覆盖更新）
+    # 合并实时基准数据（归一化日期为 YYYYMMDD 后再匹配）
     live_bm = _paper_state.get('benchmark_nav', [])
     if live_bm and benchmark_data is not None and not benchmark_data.empty:
         import pandas as _pd
-        # 取 index_daily 首日价格作为基准 1.0
+        # 归一化 benchmark_data 的日期
+        benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
         base_price = float(benchmark_data.iloc[0]['close'])
         if base_price > 0:
             for item in live_bm:
-                d = item.get('date', '')
+                d = str(item.get('date', '')).replace('-', '')[:8]
                 nav = item.get('nav', 0)
                 if d and nav > 0:
-                    price = nav * base_price  # 反算原始价格
-                    # 覆盖/追加当日
+                    price = nav * base_price
                     existing = benchmark_data[benchmark_data['trade_date'] == d]
                     if not existing.empty:
                         benchmark_data.loc[existing.index[0], 'close'] = price
