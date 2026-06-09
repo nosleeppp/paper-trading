@@ -754,6 +754,27 @@ def _calc_performance_metrics(daily_df, trades_df=None, benchmark_data=None, ris
     return metrics
 
 
+def _resolve_index_daily_path() -> str:
+    """多级回退搜索 index_daily.parquet。"""
+    # 1. 环境变量
+    p = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
+    if p and os.path.exists(p):
+        return p
+    # 2. data_dir 下级
+    data_dir = os.environ.get('PAPER_DATA_DIR', '')
+    if data_dir:
+        for sub in ('index_daily/index_daily.parquet', 'index_daily.parquet'):
+            p = os.path.join(data_dir, sub)
+            if os.path.exists(p):
+                return p
+    # 3. 常见路径
+    for p in ('/root/lqq_bot_workspace/data/index_daily/index_daily.parquet',
+              '/root/lqq_bot_workspace/data/index_daily.parquet'):
+        if os.path.exists(p):
+            return p
+    return ''
+
+
 def _compute_paper_metrics() -> dict:
     """从 DB 读取数据，用复刻的 _calc_performance_metrics 计算实盘指标。"""
     import pandas as pd
@@ -775,8 +796,8 @@ def _compute_paper_metrics() -> dict:
     ]) if order_rows else None
 
     benchmark_data = None
-    idx_path = os.environ.get('PAPER_INDEX_DAILY_PATH', '')
-    if idx_path and os.path.exists(idx_path):
+    idx_path = _resolve_index_daily_path()
+    if idx_path:
         import pandas as _pd
         idx_df = _pd.read_parquet(idx_path)
         code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
