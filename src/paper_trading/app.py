@@ -43,6 +43,7 @@ _realtime_store: Any = None         # PaperStore 实例，由 bootstrap 注入
 _realtime_targets: List[str] = []   # 持仓标的列表
 _realtime_thread: Optional[threading.Thread] = None
 _realtime_running = False
+_bench_base_price: Optional[float] = None  # 模块级，_compute_paper_metrics 和 _run_realtime_loop 共享
 
 
 def update_paper_state(report: dict):
@@ -1049,6 +1050,7 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     logger = logging.getLogger(__name__)
     provider = SinaDataProvider()
     # 基准净值：从 store nav_series 第一天的 index_daily close 作为归一化基数
+    global _bench_base_price
     _bench_base_price = None
     try:
         # 取策略起始日
