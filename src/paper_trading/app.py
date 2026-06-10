@@ -635,9 +635,7 @@ def _calc_benchmark_metrics(daily_df, benchmark_data, strategy_daily_returns, ri
         return {}
     s_nav = strategy_nav.loc[common]
     b_nav = bench_nav.loc[common]
-    # 以公共交集第一天的 close 为基准归一化（确保基准和策略同日起始=1.0）
-    if b_nav.iloc[0] > 0:
-        b_nav = b_nav / b_nav.iloc[0]
+    # 归一化已在数据准备阶段完成，此处不再重复
     total_days = len(common)
 
     strategy_return = s_nav.iloc[-1] - 1
@@ -800,51 +798,32 @@ def _compute_paper_metrics() -> dict:
         'date', 'ts_code', 'side', 'quantity', 'price', 'commission', 'tax'
     ]) if order_rows else None
 
+    # 基准：优先用 _paper_state 实时数据（已由 realtime loop 持续更新），回退 parquet
     benchmark_data = None
-    idx_path = _resolve_index_daily_path()
-    if idx_path:
-        import pandas as _pd
-        idx_df = _pd.read_parquet(idx_path)
-        code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
-        idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
-        if not idx_df.empty:
-            date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
-            close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
-            benchmark_data = idx_df[[date_col, close_col]].copy()
-            benchmark_data.columns = ['trade_date', 'close']
-            benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
-            # 只保留策略日期范围内的基准数据
-            strategy_dates = set(daily_df['date'].unique())
-            benchmark_data = benchmark_data[benchmark_data['trade_date'].isin(strategy_dates)]
-
-    # 合并实时基准：用 realtime loop 获取的当日价格
     live_bm = _paper_state.get('benchmark_nav', [])
-    if live_bm and benchmark_data is not None and not benchmark_data.empty:
+    if live_bm:
         import pandas as _pd
-        benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
-        for item in live_bm[-1:]:  # 只取最后一条（当日实时）
-            d = str(item.get('date', '')).replace('-', '')[:8]
-            if d and d not in set(benchmark_data['trade_date']):
-                # 当日未在 parquet 中：用实时价格追加
-                # 以 parquet 最后一天的 close 为基准，乘以实时 nav 反推 close
-                last_close = float(benchmark_data.iloc[-1]['close'])
-                bm_nav_val = item.get('nav', 0)
-                if bm_nav_val > 0 and last_close > 0:
-                    # 基准的 nav 已经是 close/strategy_start_close 归一化
-                    # 所以 close = nav * strategy_start_close
-                    # strategy_start_close = last_close / last_nav
-                    # 但更简单：直接用实时价格
-                    # 实时价格 = _bench_base_price * bm_nav_val
-                    if _bench_base_price and _bench_base_price > 0:
-                        today_close = _bench_base_price * bm_nav_val
-                    else:
-                        today_close = last_close * (bm_nav_val / (float(benchmark_data.iloc[-2]['close']) / _bench_base_price if len(benchmark_data) >= 2 and _bench_base_price else 1))
-                        if today_close <= 0:
-                            continue
-                    benchmark_data = _pd.concat([
-                        benchmark_data,
-                        _pd.DataFrame([{'trade_date': d, 'close': today_close}])
-                    ], ignore_index=True)
+        benchmark_data = _pd.DataFrame(live_bm)
+        if 'date' in benchmark_data.columns and 'nav' in benchmark_data.columns:
+            benchmark_data = benchmark_data.rename(columns={'date': 'trade_date'})
+            # nav 已是归一化值，_calc_benchmark_metrics 检测到 nav 列会跳过 close/close[0]
+
+    # 回退：从 parquet 读取 + 过滤到策略日期范围
+    if benchmark_data is None or benchmark_data.empty:
+        idx_path = _resolve_index_daily_path()
+        if idx_path:
+            import pandas as _pd
+            idx_df = _pd.read_parquet(idx_path)
+            code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
+            idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+            if not idx_df.empty:
+                date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
+                close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
+                benchmark_data = idx_df[[date_col, close_col]].copy()
+                benchmark_data.columns = ['trade_date', 'close']
+                benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
+                strategy_dates = set(daily_df['date'].unique())
+                benchmark_data = benchmark_data[benchmark_data['trade_date'].isin(strategy_dates)]
 
     return _calc_performance_metrics(daily_df, trades_df, benchmark_data)
 
