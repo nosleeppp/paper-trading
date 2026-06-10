@@ -1026,15 +1026,19 @@ def stop_realtime_updater():
     """停止实时更新线程。"""
     global _realtime_running
     _realtime_running = False
+    # WebSocket 连接由线程退出后自动回收
 
 
 def _run_realtime_loop(interval: int, flush_interval: int):
     """后台循环：拉价格 → 更新状态 → 写 DB → 每日追加净值。"""
     import time as _time
-    from paper_trading.data_provider import SinaDataProvider
+    from paper_trading.data_provider import WebSocketDataProvider, SinaDataProvider
 
     logger = logging.getLogger(__name__)
-    provider = SinaDataProvider()
+    provider = WebSocketDataProvider(list(_realtime_targets))
+    provider.connect()
+    bench_provider = SinaDataProvider()  # 基准价格用 HTTP（000852.SH 不在 WebSocket 订阅中）
+    logger.info("[Realtime] WebSocket 已连接, %d 只标的", len(_realtime_targets))
     # 基准净值：从 store nav_series 第一天的 index_daily close 作为归一化基数
     global _bench_base_price
     _bench_base_price = None
@@ -1158,7 +1162,7 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                     # 基准净值：盘中实时覆盖当日值
                     if _bench_base_price and _bench_base_price > 0:
                         try:
-                            bench_tick = provider.get_tick('000852.SH')
+                            bench_tick = bench_provider.get_tick('000852.SH')
                             if bench_tick and bench_tick.last_price > 0:
                                 bm_nav = bench_tick.last_price / _bench_base_price
                                 today_str2 = datetime.now().strftime('%Y%m%d')
