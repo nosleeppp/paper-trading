@@ -1133,6 +1133,28 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                     if init_cap > 0:
                         _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
 
+                    # 策略净值：盘中实时覆盖当日 nav_series（DB 和内存同步）
+                    now = datetime.now()
+                    today_str = now.strftime('%Y%m%d')
+                    tv = cash + total_mv
+                    nav_val = tv / init_cap if init_cap > 0 else 1.0
+                    try:
+                        _realtime_store.append_nav({
+                            'date': today_str, 'nav': nav_val,
+                            'total_value': tv, 'cash': cash,
+                            'position_count': len(positions),
+                            'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
+                        })
+                    except Exception:
+                        pass
+                    # 同步更新内存 pnl_curve
+                    pnl = _paper_state.get('pnl_curve', [])
+                    if pnl and pnl[-1].get('date') == today_str:
+                        pnl[-1]['nav'] = nav_val
+                    else:
+                        pnl.append({'date': today_str, 'nav': nav_val})
+                    _paper_state['pnl_curve'] = pnl
+
                     # 基准净值：盘中实时覆盖当日值
                     if _bench_base_price and _bench_base_price > 0:
                         try:
