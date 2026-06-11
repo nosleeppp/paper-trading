@@ -91,8 +91,7 @@ def update_paper_state(report: dict):
         ]
     _paper_state["intraday"] = report.get("minute_snapshots", [])
     _paper_state["last_update"] = datetime.now().isoformat()
-    # 基准净值
-    _paper_state["benchmark_nav"] = report.get("benchmark_nav", []) or []
+    # 基准净值由 bootstrap/realtime 直接管理，update_paper_state 不干预
 
 
 # ═══════════════════════════════════════════════════════════════════════
