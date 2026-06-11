@@ -91,10 +91,8 @@ def update_paper_state(report: dict):
         ]
     _paper_state["intraday"] = report.get("minute_snapshots", [])
     _paper_state["last_update"] = datetime.now().isoformat()
-    # 基准净值（如有）
-    bench = report.get("benchmark_nav", [])
-    if bench:
-        _paper_state["benchmark_nav"] = bench
+    # 基准净值
+    _paper_state["benchmark_nav"] = report.get("benchmark_nav", []) or []
 
 
 # ═══════════════════════════════════════════════════════════════════════
