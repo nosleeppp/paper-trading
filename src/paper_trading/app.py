@@ -798,32 +798,38 @@ def _compute_paper_metrics() -> dict:
         'date', 'ts_code', 'side', 'quantity', 'price', 'commission', 'tax'
     ]) if order_rows else None
 
-    # 基准：优先用 _paper_state 实时数据（已由 realtime loop 持续更新），回退 parquet
+    # 基准：parquet 提供完整历史 + _paper_state 提供当日实时
     benchmark_data = None
-    live_bm = _paper_state.get('benchmark_nav', [])
-    if live_bm:
+    idx_path = _resolve_index_daily_path()
+    if idx_path:
         import pandas as _pd
-        benchmark_data = _pd.DataFrame(live_bm)
-        if 'date' in benchmark_data.columns and 'nav' in benchmark_data.columns:
-            benchmark_data = benchmark_data.rename(columns={'date': 'trade_date'})
-            # nav 已是归一化值，_calc_benchmark_metrics 检测到 nav 列会跳过 close/close[0]
+        idx_df = _pd.read_parquet(idx_path)
+        code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
+        idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
+        if not idx_df.empty:
+            date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
+            close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
+            benchmark_data = idx_df[[date_col, close_col]].copy()
+            benchmark_data.columns = ['trade_date', 'close']
+            benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
+            strategy_dates = set(daily_df['date'].unique())
+            benchmark_data = benchmark_data[benchmark_data['trade_date'].isin(strategy_dates)]
 
-    # 回退：从 parquet 读取 + 过滤到策略日期范围
-    if benchmark_data is None or benchmark_data.empty:
-        idx_path = _resolve_index_daily_path()
-        if idx_path:
-            import pandas as _pd
-            idx_df = _pd.read_parquet(idx_path)
-            code_col = next((c for c in ['ts_code','code'] if c in idx_df.columns), idx_df.columns[1])
-            idx_df = idx_df[idx_df[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
-            if not idx_df.empty:
-                date_col = next((c for c in ['trade_date','date'] if c in idx_df.columns), idx_df.columns[0])
-                close_col = next((c for c in ['close','qfq_close'] if c in idx_df.columns), idx_df.columns[-1])
-                benchmark_data = idx_df[[date_col, close_col]].copy()
-                benchmark_data.columns = ['trade_date', 'close']
-                benchmark_data['trade_date'] = benchmark_data['trade_date'].astype(str).str.replace('-', '').str[:8]
-                strategy_dates = set(daily_df['date'].unique())
-                benchmark_data = benchmark_data[benchmark_data['trade_date'].isin(strategy_dates)]
+            # 混合当日实时基准（_paper_state['benchmark_nav'] 最后一条）
+            live_bm = _paper_state.get('benchmark_nav', [])
+            if live_bm:
+                last = live_bm[-1]
+                d = str(last.get('date', '')).replace('-', '')[:8]
+                nav = last.get('nav', 0)
+                if d and nav > 0 and d not in set(benchmark_data['trade_date']):
+                    # 反推 close = nav × 策略起始日 close（在 parquet 第一行就是）
+                    base = float(benchmark_data.iloc[0]['close'])
+                    today_close = nav * base if base > 0 else 0
+                    if today_close > 0:
+                        benchmark_data = _pd.concat([
+                            benchmark_data,
+                            _pd.DataFrame([{'trade_date': d, 'close': today_close}])
+                        ], ignore_index=True)
 
     return _calc_performance_metrics(daily_df, trades_df, benchmark_data)
 
@@ -898,7 +904,7 @@ def _register_routes(app):
         except Exception as e:
             metrics_error = str(e)
 
-        # 从 store 读取订单 + 净值曲线（DB 是唯一真相源）
+        # 从 store 读取订单；pnl_curve 直接用 _paper_state（每 tick 更新）
         orders = list(_paper_state.get("orders", []))
         pnl_curve = list(_paper_state.get("pnl_curve", []))
         try:
@@ -906,12 +912,6 @@ def _register_routes(app):
                 store_orders = _realtime_store.get_orders(limit=1000)
                 if store_orders:
                     orders = store_orders
-                # pnl_curve 从 DB nav_series 构建（backtest历史 + realtime更新）
-                nav_rows = _realtime_store._get_conn().execute(
-                    "SELECT date, nav FROM nav_series ORDER BY date"
-                ).fetchall()
-                if nav_rows:
-                    pnl_curve = [{'date': r[0], 'nav': r[1]} for r in nav_rows]
         except Exception:
             pass
 
