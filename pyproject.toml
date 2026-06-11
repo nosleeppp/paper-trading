@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paper-trading"
-version = "0.14.3"
+version = "0.14.4"
 description = "实盘模拟系统 — QMT兼容策略接口 + 逐分钟撮合 + Web监控面板"
 readme = "README.md"
 license = "MIT"
