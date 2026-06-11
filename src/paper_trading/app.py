@@ -999,17 +999,24 @@ def _calc_drawdown(nav_series: list) -> list:
 # ═══════════════════════════════════════════════════════════════════════
 
 def start_realtime_updater(store, targets: List[str],
-                           interval: int = 60, flush_interval: int = 300):
+                           interval: int = 60, flush_interval: int = 300,
+                           bench_base_price: float = None,
+                           benchmark_nav_history: list = None):
     """
     启动后台实时更新线程。
-    - 每 interval 秒拉取实时价格，更新持仓市值/PNL
-    - 每 flush_interval 秒持久化到 DB
+    - bench_base_price: 策略起始日 000852.SH 收盘价，用于实时基准净值归一化
+    - benchmark_nav_history: 历史基准净值序列 [{date, nav}]，启动时写入 _paper_state
     """
-    global _realtime_store, _realtime_targets, _realtime_thread, _realtime_running
+    global _realtime_store, _realtime_targets, _realtime_thread, _realtime_running, _bench_base_price
 
     _realtime_store = store
     _realtime_targets = list(targets)
     _realtime_running = True
+    _bench_base_price = bench_base_price
+
+    # 写入历史基准净值
+    if benchmark_nav_history:
+        _paper_state['benchmark_nav'] = list(benchmark_nav_history)
 
     _realtime_thread = threading.Thread(
         target=_run_realtime_loop,
@@ -1019,7 +1026,8 @@ def start_realtime_updater(store, targets: List[str],
     )
     _realtime_thread.start()
     logger = logging.getLogger(__name__)
-    logger.info("[Realtime] 已启动 (interval=%ds, targets=%d)", interval, len(targets))
+    logger.info("[Realtime] 已启动 (interval=%ds, targets=%d, bench_base=%.2f)",
+                interval, len(targets), bench_base_price or 0)
 
 
 def stop_realtime_updater():
@@ -1039,40 +1047,7 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     provider.connect()
     bench_provider = SinaDataProvider()  # 基准价格用 HTTP（000852.SH 不在 WebSocket 订阅中）
     logger.info("[Realtime] WebSocket 已连接, %d 只标的", len(_realtime_targets))
-    # 基准净值：从 store nav_series 第一天的 index_daily close 作为归一化基数
-    global _bench_base_price
-    _bench_base_price = None
-    try:
-        # 取策略起始日
-        first_nav = _realtime_store._get_conn().execute(
-            "SELECT date FROM nav_series ORDER BY date LIMIT 1"
-        ).fetchone()
-        strategy_start_date = str(first_nav[0]).replace('-', '')[:8] if first_nav else ''
-
-        idx_path = _resolve_index_daily_path()
-        if idx_path and strategy_start_date:
-            import pandas as _pd
-            _idf = _pd.read_parquet(idx_path)
-            code_col = next((c for c in ['ts_code','code'] if c in _idf.columns), _idf.columns[1])
-            date_col = next((c for c in ['trade_date','date'] if c in _idf.columns), _idf.columns[0])
-            close_col = next((c for c in ['close','qfq_close'] if c in _idf.columns), _idf.columns[-1])
-            _idf = _idf[_idf[code_col].astype(str).str.replace('.SH','').str.replace('.SZ','') == '000852']
-            _idf['ds'] = _idf[date_col].astype(str).str[:8]
-            start_row = _idf[_idf['ds'] == strategy_start_date]
-            if not start_row.empty:
-                _bench_base_price = float(start_row.iloc[0][close_col])
-                logger.info("[Realtime] 基准基数: %.2f (策略起始日 %s)", _bench_base_price, strategy_start_date)
-            elif not _idf.empty:
-                # 回退：策略起始日前最近一个交易日
-                _idf_sorted = _idf.sort_values('ds')
-                before = _idf_sorted[_idf_sorted['ds'] <= strategy_start_date]
-                if not before.empty:
-                    _bench_base_price = float(before.iloc[-1][close_col])
-                else:
-                    _bench_base_price = float(_idf_sorted.iloc[0][close_col])
-                logger.info("[Realtime] 基准基数(回退): %.2f", _bench_base_price)
-    except Exception:
-        pass
+    # _bench_base_price 由 start_realtime_updater 传入（bootstrap 预计算）
 
     last_flush = 0
     last_nav_date = ''
