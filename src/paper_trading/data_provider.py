@@ -81,6 +81,10 @@ def _parse_ws_message(raw: str) -> Dict[str, TickData]:
         logger.debug("非 JSON 消息: %s", raw[:80])
         return {}
 
+    # 心跳/非行情消息（int/str/list 等）
+    if not isinstance(data, dict):
+        return {}
+
     # 消息格式: {"688571.SH": {"newestPrice": 7.51, "open": 7.24, ...}, ...}
     ticks: Dict[str, TickData] = {}
     for code, item in data.items():
