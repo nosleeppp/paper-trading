@@ -1042,8 +1042,9 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     logger = logging.getLogger(__name__)
     provider = WebSocketDataProvider(list(_realtime_targets))
     provider.connect()
-    bench_provider = SinaDataProvider()  # 基准价格用 HTTP（000852.SH 不在 WebSocket 订阅中）
-    logger.info("[Realtime] WebSocket 已连接, %d 只标的", len(_realtime_targets))
+    fallback_provider = SinaDataProvider()   # WS 无数据时回退
+    bench_provider = SinaDataProvider()      # 基准价格
+    logger.info("[Realtime] WebSocket+ Sina回退已就绪, %d 只标的", len(_realtime_targets))
     # _bench_base_price 由 start_realtime_updater 传入（bootstrap 预计算）
 
     last_flush = 0
@@ -1085,8 +1086,10 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     while _realtime_running:
         try:
             if _realtime_targets:
-                # 获取实时行情
+                # 获取实时行情（优先 WS 缓存，无数据回退 Sina HTTP）
                 live_ticks = provider.get_ticks_batch(_realtime_targets)
+                if not live_ticks:
+                    live_ticks = fallback_provider.get_ticks_batch(_realtime_targets)
                 if live_ticks:
                     # 更新内存中的持仓价格
                     positions = _paper_state.get('positions', [])
