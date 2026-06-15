@@ -1,33 +1,36 @@
 """
-自动调仓模块 — 周频策略
-=======================
-后台线程：周四 21:00 生成信号 → 周五 09:30 执行调仓。
+自动调仓模块 — 通用版
+=====================
+读取策略的 SCHEDULE_CONFIG，自动匹配时间触发选股/调仓。
+支持周频、双周频、月频等所有 quant_backtest 调度模式。
 
 用法:
-  from paper_trading.auto_trader import WeeklyAutoTrader
-  trader = WeeklyAutoTrader(store, cfg)
+  from paper_trading.auto_trader import AutoTrader
+  trader = AutoTrader(store, cfg)
   trader.start()
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class WeeklyAutoTrader:
+class AutoTrader:
     """
-    周频自动调仓器。
+    通用自动调仓器。读取策略 SCHEDULE_CONFIG，按配置时间自动执行。
 
-    信号日（周四 21:00）：调用 quant_backtest 在线生成下周目标池
-    调仓日（周五 09:30）：等权调仓到目标池，持久化到 PaperStore
+    SCHEDULE_CONFIG 格式（quant_backtest）:
+      [{'func': '_on_select',    'weekday': 4, 'time': '15:00'},   # 周频
+       {'func': '_on_rebalance', 'weekday': 5, 'time': '09:30'}]
+      [{'func': '_on_select',    'monthday': -2, 'time': '15:00'}, # 月频
+       {'func': '_on_rebalance', 'monthday': -1, 'time': '09:30'}]
     """
 
     def __init__(self, store, cfg: dict):
@@ -37,17 +40,40 @@ class WeeklyAutoTrader:
         self._thread: Optional[threading.Thread] = None
         self._targets: List[str] = []
         self._signal_date = ''
-        self._select_done = False
-        self._trade_done = False
+        self._schedule: List[dict] = []       # 解析后的调度表
+        self._done_today: Dict[str, bool] = {}  # {func: done}
+
+    # ── 生命周期 ──────────────────────────────────────
 
     def start(self):
         self._running = True
+        self._schedule = self._load_schedule()
+        if not self._schedule:
+            logger.warning("[AutoTrader] SCHEDULE_CONFIG 为空，自动调仓未启动")
+            return
         self._thread = threading.Thread(target=self._run, name="auto-trader", daemon=True)
         self._thread.start()
-        logger.info("[AutoTrader] 已启动 (周四21:00选股, 周五09:30调仓)")
+        logger.info("[AutoTrader] 已启动 (schedule=%d entries)", len(self._schedule))
 
     def stop(self):
         self._running = False
+
+    # ── 调度加载 ──────────────────────────────────────
+
+    def _load_schedule(self) -> List[dict]:
+        """从策略文件读取 SCHEDULE_CONFIG。"""
+        module_name = self._cfg.get('strategy_module', '')
+        collab_root = self._cfg.get('collab_root', '')
+        if not module_name:
+            return []
+        mod = self._load_module(module_name, collab_root)
+        for name in dir(mod):
+            obj = getattr(mod, name)
+            if hasattr(obj, 'SCHEDULE_CONFIG') and isinstance(obj.SCHEDULE_CONFIG, list):
+                return obj.SCHEDULE_CONFIG
+        return []
+
+    # ── 主循环 ────────────────────────────────────────
 
     def _run(self):
         import time as _time
@@ -60,25 +86,75 @@ class WeeklyAutoTrader:
 
     def _check_and_act(self):
         now = datetime.now()
-        weekday = now.weekday()  # 0=Mon ... 3=Thu, 4=Fri
-        h, m = now.hour, now.minute
+        today = now.date()
 
-        # ── 周四 21:00:00~21:01:00：生成信号 ──
-        if weekday == 3 and h == 21 and m == 0 and not self._select_done:
-            self._generate_signal(now)
-            self._select_done = True
-            self._trade_done = False
+        for entry in self._schedule:
+            func = entry.get('func', '')
+            time_str = entry.get('time', '09:30')
+            if not self._time_matches(now, time_str):
+                continue
 
-        # ── 周五 09:30:00~09:31:00：执行调仓 ──
-        if weekday == 4 and h == 9 and m == 30 and not self._trade_done:
-            self._execute_rebalance(now)
-            self._trade_done = True
-            self._select_done = False
+            # 检查日期条件
+            weekday = entry.get('weekday')
+            monthday = entry.get('monthday')
+            if weekday is not None:
+                if now.weekday() != weekday:
+                    continue
+            elif monthday is not None:
+                if not self._is_monthday(today, monthday):
+                    continue
 
-        # ── 周六凌晨重置 ──
-        if weekday == 5 and h == 0 and m == 0:
-            self._select_done = False
-            self._trade_done = False
+            # 当日已执行则跳过
+            key = f"{func}_{today.isoformat()}"
+            if self._done_today.get(key):
+                continue
+
+            # 执行
+            if func == '_on_select':
+                self._generate_signal(now)
+            elif func == '_on_rebalance':
+                self._execute_rebalance(now)
+
+            self._done_today[key] = True
+
+    # ── 时间/日期匹配 ─────────────────────────────────
+
+    @staticmethod
+    def _time_matches(now: datetime, time_str: str) -> bool:
+        """检查当前分钟是否匹配 HH:MM。"""
+        parts = time_str.split(':')
+        if len(parts) != 2:
+            return False
+        return now.hour == int(parts[0]) and now.minute == int(parts[1])
+
+    def _is_monthday(self, today: date, monthday: int) -> bool:
+        """检查今天是否为当月第 |monthday| 个交易日（负数=倒数）。"""
+        cal_path = self._cfg.get('trade_calendar_path', '')
+        trading_days = self._get_month_trading_days(today.year, today.month, cal_path)
+        if not trading_days:
+            return False
+        try:
+            target = trading_days[monthday]  # monthday=-1 → 最后, -2 → 倒数第二
+            return today == target
+        except IndexError:
+            return False
+
+    def _get_month_trading_days(self, year: int, month: int, cal_path: str) -> List[date]:
+        """获取当月交易日列表。"""
+        if cal_path and os.path.exists(cal_path):
+            try:
+                import pandas as pd
+                ext = os.path.splitext(cal_path)[1].lower()
+                df = pd.read_parquet(cal_path) if ext in ('.parquet', '.pq') else pd.read_csv(cal_path)
+                date_col = df.columns[0]
+                all_dates = sorted(pd.to_datetime(df[date_col]).dt.date.unique())
+                return [d for d in all_dates if d.year == year and d.month == month]
+            except Exception:
+                pass
+        # 回退：所有工作日
+        import calendar
+        _, last_day = calendar.monthrange(year, month)
+        return [date(year, month, d) for d in range(1, last_day + 1) if date(year, month, d).weekday() < 5]
 
     # ── 信号生成 ──────────────────────────────────────
 
@@ -88,28 +164,25 @@ class WeeklyAutoTrader:
         data_dir = self._cfg.get('data_dir', '')
 
         if not module_name:
-            logger.warning("[AutoTrader] strategy_module 未配置，跳过信号生成")
+            logger.warning("[AutoTrader] strategy_module 未配置")
             return
 
         print(f"\n[AutoTrader] {'='*50}")
-        print(f"[AutoTrader] {now.strftime('%Y-%m-%d %H:%M')} 信号生成开始")
+        print(f"[AutoTrader] {now.strftime('%Y-%m-%d %H:%M')} 信号生成")
         print(f"[AutoTrader] {'='*50}")
 
         try:
             if collab_root not in sys.path:
                 sys.path.insert(0, collab_root)
 
-            from quant_backtest import DataCache
-
-            # 加载策略模块
             mod = self._load_module(module_name, collab_root)
             StrategyClass = self._find_strategy_class(mod)
             strategy = StrategyClass(data_dir=data_dir)
 
+            from quant_backtest import DataCache
             duckdb_path = self._cfg.get('duckdb_path', os.path.join(data_dir, 'data.duckdb'))
             data_cache = DataCache(data_dir=data_dir, duckdb_file=os.path.basename(duckdb_path))
 
-            # 加载因子数据
             today_str = now.strftime('%Y%m%d')
             year = int(today_str[:4])
             factor_df = strategy._load_factor_chunk(data_cache, f'{year-1}0101', f'{year}1231')
@@ -122,7 +195,6 @@ class WeeklyAutoTrader:
             for d, grp in factor_df.groupby('trade_date'):
                 strategy._factor_cache[str(d)] = grp.set_index('ts_code')[factor_cols]
 
-            # 运行 _on_select
             class BTMock:
                 def __init__(self, dc): self._data_cache = dc
             ctx = type('Ctx', (), {'current_dt': today_str, '_backtester': BTMock(data_cache)})()
@@ -141,8 +213,7 @@ class WeeklyAutoTrader:
             self._signal_date = today_str
             self._store.save_signal(today_str, '', self._targets)
             self._store.flush()
-            print(f"[AutoTrader] 信号已生成: {len(self._targets)} 只标的")
-            print(f"[AutoTrader] 信号日: {today_str}")
+            print(f"[AutoTrader] ✓ 信号: {len(self._targets)} 只")
 
         except Exception as e:
             print(f"[AutoTrader] 信号生成失败: {e}")
@@ -161,15 +232,14 @@ class WeeklyAutoTrader:
             return
 
         print(f"\n[AutoTrader] {'='*50}")
-        print(f"[AutoTrader] {now.strftime('%Y-%m-%d %H:%M')} 调仓开始")
-        print(f"[AutoTrader] 目标池: {len(targets)} 只, 等权={100/len(targets):.2f}%")
+        print(f"[AutoTrader] {now.strftime('%Y-%m-%d %H:%M')} 调仓")
+        print(f"[AutoTrader] 目标: {len(targets)} 只, 等权")
         print(f"[AutoTrader] {'='*50}")
 
         try:
             from paper_trading.broker import PaperBroker, BrokerConfig
-            from paper_trading.qmt_compat import OP_BUY, OP_SELL, ORDER_MARKET
+            from paper_trading.qmt_compat import OP_BUY, OP_SELL, ORDER_MARKET, TickData, PositionInfo
 
-            # 从 store 恢复当前状态
             state = self._store.load_state()
             acc = state.get('account', {})
             cash = acc.get('cash', 0)
@@ -178,62 +248,51 @@ class WeeklyAutoTrader:
             broker = PaperBroker(BrokerConfig(initial_capital=init_cap))
             broker.current_date = now.strftime('%Y%m%d')
             broker.current_time = '09:30:00'
+            broker.cash = cash
+            broker.initial_capital = init_cap
 
-            # 恢复持仓
             for code, p in state.get('positions', {}).items():
-                pi = __import__('paper_trading.qmt_compat', fromlist=['PositionInfo']).PositionInfo(
-                    stockcode=code,
-                    quantity=int(p.get('quantity', 0)),
+                broker._positions[code] = PositionInfo(
+                    stockcode=code, quantity=int(p.get('quantity', 0)),
                     available=int(p.get('quantity', 0)),
                     avg_cost=float(p.get('avg_cost', 0)),
                     market_value=float(p.get('market_value', 0)),
                 )
-                broker._positions[code] = pi
-            broker.cash = cash
-            broker.initial_capital = init_cap
 
-            # 获取实时行情
             from paper_trading.data_provider import SinaDataProvider
             provider = SinaDataProvider()
             ticks = provider.get_ticks_batch(targets)
-            # 补充无行情标的
             for code in targets:
                 if code not in ticks:
-                    from paper_trading.qmt_compat import TickData
                     ticks[code] = TickData(stockcode=code, last_price=10.0)
             broker.update_market_data(ticks, {})
 
-            current_positions = broker.get_all_positions()
-            current_codes = set(current_positions.keys())
+            current = broker.get_all_positions()
+            current_codes = set(current.keys())
             target_set = set(targets)
 
-            # 卖出不在目标池的
-            to_sell = current_codes - target_set
-            for code in to_sell:
-                pos = current_positions[code]
-                qty = pos.available
+            # 卖出
+            for code in current_codes - target_set:
+                qty = current[code].available
                 if qty > 0:
-                    broker.submit_order(OP_SELL, ORDER_MARKET, code, qty,
-                                       ticks.get(code, type('T',(),{'last_price':10})()).last_price)
+                    broker.submit_order(OP_SELL, ORDER_MARKET, code, qty, ticks[code].last_price)
 
-            # 等权买入新增标的
+            # 买入
             to_buy = target_set - current_codes
             if to_buy:
-                total_value = broker.total_value
-                weight = 1.0 / len(targets)
+                tv = broker.total_value
+                w = 1.0 / len(targets)
                 for code in sorted(to_buy):
                     tick = ticks.get(code)
                     if not tick or tick.last_price <= 0:
                         continue
-                    amount = total_value * weight * 0.98
-                    qty = int(amount / tick.last_price / 100) * 100
+                    qty = int(tv * w * 0.98 / tick.last_price / 100) * 100
                     if qty >= 100:
                         broker.submit_order(OP_BUY, ORDER_MARKET, code, qty, tick.last_price)
 
             broker.settle()
             positions = broker.get_all_positions()
 
-            # 持久化
             trade_date = now.strftime('%Y%m%d')
             self._store.save_account({
                 'cash': broker.cash, 'total_value': broker.total_value,
@@ -247,28 +306,25 @@ class WeeklyAutoTrader:
                 for code, p in positions.items()
             })
             self._store.append_orders([{
-                'time': f'{trade_date} 09:30:00',
-                'stockcode': o.stockcode,
+                'time': f'{trade_date} 09:30:00', 'stockcode': o.stockcode,
                 'side': 'BUY' if o.op_type == 23 else 'SELL',
                 'quantity': o.filled_quantity, 'price': o.filled_price,
             } for o in broker.get_orders()])
             self._store.append_nav({
-                'date': trade_date, 'nav': broker.total_value / max(broker.initial_capital, 1),
+                'date': trade_date, 'nav': broker.total_value / max(init_cap, 1),
                 'total_value': broker.total_value, 'cash': broker.cash,
                 'position_count': len(positions),
                 'daily_return': broker.total_return,
             })
-            # 更新信号记录中的 rebalance_date
             latest = self._store.get_latest_signal()
             if latest and not latest.get('rebalance_date'):
                 self._store.save_signal(latest['signal_date'], trade_date, latest['targets'])
             self._store.flush()
 
-            # 更新 _paper_state（Web 面板即时可见）
             try:
                 from paper_trading.app import update_paper_state
-                report = {
-                    'date': trade_date, 'initial_capital': broker.initial_capital,
+                update_paper_state({
+                    'date': trade_date, 'initial_capital': init_cap,
                     'cash': broker.cash, 'total_value': broker.total_value,
                     'total_return': broker.total_return,
                     'positions': {code: {
@@ -281,37 +337,27 @@ class WeeklyAutoTrader:
                         'quantity': o.filled_quantity, 'price': o.filled_price,
                     } for o in broker.get_orders()],
                     'minute_snapshots': [],
-                }
-                update_paper_state(report)
+                })
             except Exception:
                 pass
 
-            sold = len(to_sell)
-            bought = len(to_buy)
-            print(f"[AutoTrader] 调仓完成: 卖出{sold}只, 买入{bought}只")
-            print(f"[AutoTrader] 总资产: {broker.total_value:,.0f}")
+            print(f"[AutoTrader] ✓ 调仓完成: 总资产 {broker.total_value:,.0f}")
 
         except Exception as e:
             print(f"[AutoTrader] 调仓失败: {e}")
             import traceback; traceback.print_exc()
 
-    # ── 工具方法 ──────────────────────────────────────
+    # ── 策略加载工具 ──────────────────────────────────
 
     def _load_module(self, module_name: str, collab_root: str):
-        """加载策略模块（支持文件路径 / dotted path）。"""
         import importlib.util as _util
         mod = None
         if module_name.endswith('.py'):
-            if os.path.isabs(module_name) and os.path.exists(module_name):
-                spec = _util.spec_from_file_location('_at_strategy', module_name)
+            fpath = module_name if os.path.isabs(module_name) else os.path.join(collab_root, module_name)
+            if os.path.exists(fpath):
+                spec = _util.spec_from_file_location('_at_strategy', fpath)
                 mod = _util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-            else:
-                fpath = os.path.join(collab_root, module_name)
-                if os.path.exists(fpath):
-                    spec = _util.spec_from_file_location('_at_strategy', fpath)
-                    mod = _util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
         if mod is None:
             mod = __import__(module_name, fromlist=['*'])
         return mod
