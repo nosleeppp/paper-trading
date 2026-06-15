@@ -61,7 +61,7 @@ class AutoTrader:
     # ── 调度加载 ──────────────────────────────────────
 
     def _load_schedule(self) -> List[dict]:
-        """从策略文件读取 SCHEDULE_CONFIG。"""
+        """从策略文件读取 SCHEDULE_CONFIG，允许 config.json 覆盖 _on_select 时间。"""
         module_name = self._cfg.get('strategy_module', '')
         collab_root = self._cfg.get('collab_root', '')
         if not module_name:
@@ -70,7 +70,13 @@ class AutoTrader:
         for name in dir(mod):
             obj = getattr(mod, name)
             if hasattr(obj, 'SCHEDULE_CONFIG') and isinstance(obj.SCHEDULE_CONFIG, list):
-                return obj.SCHEDULE_CONFIG
+                schedule = [dict(e) for e in obj.SCHEDULE_CONFIG]  # shallow copy
+                # config.json 可覆盖信号时间
+                select_time = self._cfg.get('select_time', '')
+                for entry in schedule:
+                    if entry.get('func') == '_on_select' and select_time:
+                        entry['time'] = select_time
+                return schedule
         return []
 
     # ── 主循环 ────────────────────────────────────────
