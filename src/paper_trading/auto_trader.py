@@ -93,6 +93,7 @@ class AutoTrader:
     def _check_and_act(self):
         now = datetime.now()
         today = now.date()
+        cal_path = self._cfg.get('trade_calendar_path', '')
 
         for entry in self._schedule:
             func = entry.get('func', '')
@@ -104,11 +105,20 @@ class AutoTrader:
             weekday = entry.get('weekday')
             monthday = entry.get('monthday')
             if weekday is not None:
-                if now.weekday() != weekday:
+                # quant_backtest 用 1=周一..5=周五，date.weekday() 是 0=周一
+                if (now.weekday() + 1) != weekday:
+                    continue
+                # 调仓日必须是交易日（假日跳过）
+                if func == '_on_rebalance' and not self._is_trading_day(today, cal_path):
+                    continue
+                # 选股日也检查（假日可正常选股，但如果需要交易日也可加）
+                if func == '_on_select' and not self._is_trading_day(today, cal_path):
+                    logger.info("[AutoTrader] %s 非交易日，选股跳过", today)
                     continue
             elif monthday is not None:
                 if not self._is_monthday(today, monthday):
                     continue
+                # monthday 已通过交易日历判断，无需额外检查
 
             # 当日已执行则跳过
             key = f"{func}_{today.isoformat()}"
@@ -132,6 +142,11 @@ class AutoTrader:
         if len(parts) != 2:
             return False
         return now.hour == int(parts[0]) and now.minute == int(parts[1])
+
+    def _is_trading_day(self, today: date, cal_path: str) -> bool:
+        """检查今天是否为交易日。"""
+        days = self._get_month_trading_days(today.year, today.month, cal_path)
+        return today in days
 
     def _is_monthday(self, today: date, monthday: int) -> bool:
         """检查今天是否为当月第 |monthday| 个交易日（负数=倒数）。"""
