@@ -202,7 +202,7 @@ class AutoTrader:
 
             from quant_backtest import DataCache
             duckdb_path = self._cfg.get('duckdb_path', os.path.join(data_dir, 'data.duckdb'))
-            data_cache = DataCache(data_dir=data_dir, duckdb_file=os.path.basename(duckdb_path))
+            data_cache = DataCache(data_dir=data_dir, duckdb_file=duckdb_path)
 
             today_str = now.strftime('%Y%m%d')
             year = int(today_str[:4])
