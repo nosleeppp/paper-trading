@@ -239,12 +239,12 @@ class AutoTrader:
                     print(f"[AutoTrader] candidates: {len(self._targets)} 只")
 
             if not self._targets:
-                # 诊断
                 fc = getattr(strategy, '_factor_cache', {})
                 sc = getattr(strategy, '_select_cache', {})
+                cv = sc.get(signal_date, 'NOT_FOUND')
                 print(f"[AutoTrader] 诊断: _factor_cache={len(fc)}天, "
-                      f"_select_cache={list(sc.keys())[:3]}, "
-                      f"signal_date={signal_date} in cache={signal_date in fc}")
+                      f"cached_value={cv}, type={type(cv).__name__}, "
+                      f"signal_date={signal_date} in fc={signal_date in fc}")
                 return
 
             self._signal_date = signal_date
