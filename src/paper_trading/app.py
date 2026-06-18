@@ -1040,15 +1040,16 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     from paper_trading.data_provider import WebSocketDataProvider, SinaDataProvider
 
     logger = logging.getLogger(__name__)
+    print(f"[Realtime] LOOP START: targets={len(_realtime_targets)}只", flush=True)
     provider = WebSocketDataProvider(list(_realtime_targets))
     provider.connect()
-    fallback_provider = SinaDataProvider()   # WS 无数据时回退
-    bench_provider = SinaDataProvider()      # 基准价格
+    fallback_provider = SinaDataProvider()
+    bench_provider = SinaDataProvider()
     logger.info("[Realtime] WebSocket+ Sina回退已就绪, %d 只标的", len(_realtime_targets))
-    # _bench_base_price 由 start_realtime_updater 传入（bootstrap 预计算）
 
     last_flush = 0
     last_nav_date = ''
+    cycle_count = 0
 
     # 启动时立即追加当日净值（如果 nav_series 还没有今天的记录）
     today_str = datetime.now().strftime('%Y%m%d')
@@ -1085,6 +1086,9 @@ def _run_realtime_loop(interval: int, flush_interval: int):
 
     while _realtime_running:
         try:
+            cycle_count += 1
+            if cycle_count % 12 == 1:  # ~每分钟
+                print(f"[Realtime] cycle={cycle_count}, targets={len(_realtime_targets)}", flush=True)
             # 检测调仓：持仓变化时重订阅 WebSocket
             current_codes = [p['stockcode'] for p in _paper_state.get('positions', [])]
             if current_codes and set(current_codes) != set(_realtime_targets):
