@@ -295,27 +295,27 @@ class SinaDataProvider:
             return None
 
     def get_ticks_batch(self, stockcodes: List[str]) -> Dict[str, TickData]:
-        """批量获取实时行情（合并为单次请求）。"""
-        sina_codes = ",".join(self.to_sina_code(c) for c in stockcodes)
-        url = SINA_API_URL.format(codes=sina_codes)
+        """批量获取实时行情（分批请求，每批最多30只）。"""
         result: Dict[str, TickData] = {}
-        try:
-            resp = self._session.get(url, timeout=5)
-            resp.encoding = "gbk"
-            if resp.status_code != 200:
-                logger.warning("新浪批量请求失败: HTTP %s", resp.status_code)
-                return result
-            # 响应包含多行 var hq_str_xxx="...";
-            lines = resp.text.strip().split("\n")
-            # 按发送顺序对应
-            for i, line in enumerate(lines):
-                if i >= len(stockcodes):
-                    break
-                tick = _parse_sina_response(line, stockcodes[i])
-                if tick:
-                    result[stockcodes[i]] = tick
-        except requests.RequestException as e:
-            logger.warning("新浪批量请求异常: %s", e)
+        batch_size = 30
+        for start in range(0, len(stockcodes), batch_size):
+            batch = stockcodes[start:start + batch_size]
+            sina_codes = ",".join(self.to_sina_code(c) for c in batch)
+            url = SINA_API_URL.format(codes=sina_codes)
+            try:
+                resp = self._session.get(url, timeout=5)
+                resp.encoding = "gbk"
+                if resp.status_code != 200:
+                    continue
+                lines = resp.text.strip().split("\n")
+                for i, line in enumerate(lines):
+                    if i >= len(batch):
+                        break
+                    tick = _parse_sina_response(line, batch[i])
+                    if tick:
+                        result[batch[i]] = tick
+            except requests.RequestException:
+                continue
         return result
 
     def get_limit_info(self, trade_date: str) -> dict:
