@@ -232,9 +232,11 @@ function updateTradesTable(trades, tableId) {
 function populateTradeDates(trades) {
     const select = document.getElementById('paper-trade-filter');
     if (!select) return;
+    const cur = select.value;  // 保存用户选择
     const dates = [...new Set(trades.map(t => (t.time || t.date || '').substring(0, 8)))].filter(Boolean).sort().reverse();
     select.innerHTML = '<option value="">全部日期</option>' +
         dates.map(d => `<option value="${d}">${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}</option>`).join('');
+    if (cur) select.value = cur;  // 恢复选择
 }
 
 function filterPaperTrades() {
