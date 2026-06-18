@@ -1090,10 +1090,12 @@ def _run_realtime_loop(interval: int, flush_interval: int):
             if current_codes:
                 _realtime_targets[:] = current_codes
             if _realtime_targets:
-                # 获取实时行情（优先 WS 缓存，无数据回退 Sina HTTP）
-                live_ticks = provider.get_ticks_batch(_realtime_targets)
-                if not live_ticks:
-                    live_ticks = fallback_provider.get_ticks_batch(_realtime_targets)
+                # Sina 主源 + WS 补充（WS 订阅可能不含调仓后新股）
+                live_ticks = fallback_provider.get_ticks_batch(_realtime_targets)
+                ws_ticks = provider.get_ticks_batch(_realtime_targets)
+                for code, tick in ws_ticks.items():
+                    if code not in live_ticks:
+                        live_ticks[code] = tick
                 if live_ticks:
                     # 更新内存中的持仓价格
                     positions = _paper_state.get('positions', [])
