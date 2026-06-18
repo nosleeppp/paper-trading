@@ -1085,6 +1085,10 @@ def _run_realtime_loop(interval: int, flush_interval: int):
 
     while _realtime_running:
         try:
+            # 每周期从 _paper_state 刷新持仓代码（调仓后自动更新）
+            current_codes = [p['stockcode'] for p in _paper_state.get('positions', [])]
+            if current_codes:
+                _realtime_targets[:] = current_codes
             if _realtime_targets:
                 # 获取实时行情（优先 WS 缓存，无数据回退 Sina HTTP）
                 live_ticks = provider.get_ticks_batch(_realtime_targets)
