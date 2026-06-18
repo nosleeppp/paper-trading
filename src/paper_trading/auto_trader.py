@@ -216,15 +216,19 @@ class AutoTrader:
             for d, grp in factor_df.groupby('trade_date'):
                 strategy._factor_cache[str(d)] = grp.set_index('ts_code')[factor_cols]
 
+            # 用 _factor_cache 最新日期作为信号日（因子数据可能未到当天）
+            signal_date = max(strategy._factor_cache.keys()) if strategy._factor_cache else today_str
+            print(f"[AutoTrader] 信号日={signal_date} (_factor_cache={len(strategy._factor_cache)}天, today={today_str})")
+
             class BTMock:
                 def __init__(self, dc): self._data_cache = dc
-            ctx = type('Ctx', (), {'current_dt': today_str, '_backtester': BTMock(data_cache)})()
+            ctx = type('Ctx', (), {'current_dt': signal_date, '_backtester': BTMock(data_cache)})()
             strategy._on_select(ctx)
 
-            cached = strategy._select_cache.get(today_str)
+            cached = strategy._select_cache.get(signal_date)
             if cached:
                 self._targets = list(cached[0]) if isinstance(cached, tuple) else list(cached)
-                print(f"[AutoTrader] _select_cache[{today_str}]: {len(self._targets)} 只")
+                print(f"[AutoTrader] _select_cache[{signal_date}]: {len(self._targets)} 只")
 
             if not self._targets:
                 self._targets = getattr(strategy, 'candidates', [])
@@ -237,13 +241,13 @@ class AutoTrader:
                 sc = getattr(strategy, '_select_cache', {})
                 print(f"[AutoTrader] 诊断: _factor_cache={len(fc)}天, "
                       f"_select_cache={list(sc.keys())[:3]}, "
-                      f"today={today_str} in cache={today_str in fc}")
+                      f"signal_date={signal_date} in cache={signal_date in fc}")
                 return
 
-            self._signal_date = today_str
-            self._store.save_signal(today_str, '', self._targets)
+            self._signal_date = signal_date
+            self._store.save_signal(signal_date, '', self._targets)
             self._store.flush()
-            print(f"[AutoTrader] ✓ 信号: {len(self._targets)} 只")
+            print(f"[AutoTrader] ✓ 信号: {len(self._targets)} 只 (signal_date={signal_date})")
 
         except Exception as e:
             print(f"[AutoTrader] 信号生成失败: {e}")
