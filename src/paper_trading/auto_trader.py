@@ -224,11 +224,20 @@ class AutoTrader:
             cached = strategy._select_cache.get(today_str)
             if cached:
                 self._targets = list(cached[0]) if isinstance(cached, tuple) else list(cached)
-            else:
-                self._targets = getattr(strategy, 'candidates', [])
+                print(f"[AutoTrader] _select_cache[{today_str}]: {len(self._targets)} 只")
 
             if not self._targets:
-                print("[AutoTrader] 错误: 未生成信号")
+                self._targets = getattr(strategy, 'candidates', [])
+                if self._targets:
+                    print(f"[AutoTrader] candidates: {len(self._targets)} 只")
+
+            if not self._targets:
+                # 诊断
+                fc = getattr(strategy, '_factor_cache', {})
+                sc = getattr(strategy, '_select_cache', {})
+                print(f"[AutoTrader] 诊断: _factor_cache={len(fc)}天, "
+                      f"_select_cache={list(sc.keys())[:3]}, "
+                      f"today={today_str} in cache={today_str in fc}")
                 return
 
             self._signal_date = today_str
