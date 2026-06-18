@@ -216,9 +216,11 @@ class AutoTrader:
             for d, grp in factor_df.groupby('trade_date'):
                 strategy._factor_cache[str(d)] = grp.set_index('ts_code')[factor_cols]
 
-            # 信号日 = 最新因子日期（如20260617），IC 截止日 = 前一个交易日（20260616）
+            # 信号日 = 最新因子日期（如20260617），IC 截止日 = 前一天（20260616）
             signal_date = max(strategy._factor_cache.keys()) if strategy._factor_cache else today_str
-            ic_end_date = data_cache.get_prev_trade_date(signal_date) or signal_date
+            from datetime import timedelta
+            ic_dt = datetime.strptime(signal_date, '%Y%m%d') - timedelta(days=1)
+            ic_end_date = ic_dt.strftime('%Y%m%d')
             print(f"[AutoTrader] 信号日={signal_date}, IC截止日={ic_end_date} (_factor_cache={len(strategy._factor_cache)}天)")
 
             class BTMock:
