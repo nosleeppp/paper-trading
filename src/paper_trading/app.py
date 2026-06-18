@@ -1085,17 +1085,26 @@ def _run_realtime_loop(interval: int, flush_interval: int):
 
     while _realtime_running:
         try:
-            # 每周期从 _paper_state 刷新持仓代码（调仓后自动更新）
+            # 检测调仓：持仓变化时重订阅 WebSocket
             current_codes = [p['stockcode'] for p in _paper_state.get('positions', [])]
-            if current_codes:
+            if current_codes and set(current_codes) != set(_realtime_targets):
+                logger.info("[Realtime] 持仓变更, 重订阅 WS: %d只 → %d只",
+                           len(_realtime_targets), len(current_codes))
+                _realtime_targets[:] = current_codes
+                try:
+                    provider.disconnect()
+                except Exception:
+                    pass
+                from paper_trading.data_provider import WebSocketDataProvider
+                provider = WebSocketDataProvider(list(current_codes))
+                provider.connect()
+            if not current_codes:
                 _realtime_targets[:] = current_codes
             if _realtime_targets:
-                # Sina 主源 + WS 补充（WS 订阅可能不含调仓后新股）
-                live_ticks = fallback_provider.get_ticks_batch(_realtime_targets)
-                ws_ticks = provider.get_ticks_batch(_realtime_targets)
-                for code, tick in ws_ticks.items():
-                    if code not in live_ticks:
-                        live_ticks[code] = tick
+                # WS 主源，无数据回退 Sina
+                live_ticks = provider.get_ticks_batch(_realtime_targets)
+                if not live_ticks:
+                    live_ticks = fallback_provider.get_ticks_batch(_realtime_targets)
                 if live_ticks:
                     # 更新内存中的持仓价格
                     positions = _paper_state.get('positions', [])
