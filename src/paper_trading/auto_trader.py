@@ -204,6 +204,17 @@ class AutoTrader:
             duckdb_path = self._cfg.get('duckdb_path', os.path.join(data_dir, 'data.duckdb'))
             data_cache = DataCache(data_dir=data_dir, duckdb_file=duckdb_path)
 
+            # 确保股票池过滤可用（_stock_basic_df 需从 DuckDB 加载）
+            if getattr(data_cache, '_stock_basic_df', None) is None:
+                try:
+                    con = data_cache._get_duckdb_con()
+                    df = con.execute("SELECT * FROM stock_basic").fetchdf()
+                    if not df.empty:
+                        data_cache._stock_basic_df = df
+                        print(f"[AutoTrader] _stock_basic_df: {len(df)} 只")
+                except Exception:
+                    print("[AutoTrader] ⚠ stock_basic 表不可用，股票池过滤可能失效")
+
             today_str = now.strftime('%Y%m%d')
             year = int(today_str[:4])
             factor_df = strategy._load_factor_chunk(data_cache, f'{year-1}0101', f'{year}1231')
