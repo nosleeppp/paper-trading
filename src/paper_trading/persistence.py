@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS nav_series (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS dividend_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stockcode TEXT NOT NULL,
+    ex_date TEXT NOT NULL,
+    cash_per_share REAL DEFAULT 0.0,
+    stock_div_ratio REAL DEFAULT 0.0,
+    dr_factor REAL DEFAULT 1.0,
+    shares_before INTEGER DEFAULT 0,
+    cost_before REAL DEFAULT 0.0,
+    cost_after REAL DEFAULT 0.0,
+    cash_added REAL DEFAULT 0.0,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     signal_date TEXT NOT NULL,

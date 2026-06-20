@@ -39,6 +39,7 @@ from paper_trading.data_provider import DataProvider
 from paper_trading.app import app, update_paper_state, run_production
 from paper_trading.persistence import PaperStore
 from paper_trading.auto_trader import AutoTrader
+from paper_trading.dividend import DividendAdjuster
 from paper_trading.scheduler import set_trade_calendar_file
 from paper_trading.qmt_compat import (
     Context, passorder, set_basket, order_algo,
