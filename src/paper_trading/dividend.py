@@ -106,7 +106,9 @@ class DividendAdjuster:
     def check_events(self) -> List[dict]:
         """
         扫描持仓，返回需要处理的分红事件。
-        每个事件包含: {stockcode, ex_date, dr, cash_div_per_share, stk_div_ratio, shares_before, cost_before}
+
+        主检测逻辑：adj_factor 变动（任何复权因子跳变 = 除权事件）。
+        dividend_detail 作为补充数据（现金分红/送股明细），不是必要条件。
         """
         self._ensure_data()
         positions = self._store.get_positions()
@@ -128,61 +130,65 @@ class DividendAdjuster:
             if qty <= 0:
                 continue
 
-            # 查该股票的除权除息事件
-            div_rows = self._div_df[self._div_df['ts_code'] == code].copy()
-            if div_rows.empty:
-                continue
-
-            # 只处理 div_proc == '实施方案' 且 ex_date 已确定的事件
-            div_rows = div_rows[
-                (div_rows['div_proc'] == '实施方案') &
-                (div_rows['ex_date'].notna())
-            ]
-            if div_rows.empty:
-                continue
-
-            # 查复权因子变动
+            # 主检测：从 adj_factor 找变动点
             adj_rows = self._adj_df[self._adj_df['ts_code'] == code].sort_values('trade_date')
             if len(adj_rows) < 2:
                 continue
 
             first_buy = first_buy_dates.get(code, '19700101')
+            prev_adj = None
+            prev_date = None
 
-            for _, div in div_rows.iterrows():
-                ex_date_str = str(div['ex_date'])[:10].replace('-', '')[:8]
-                if ex_date_str <= first_buy:
-                    continue  # 持仓前发生的，跳过
+            for _, row in adj_rows.iterrows():
+                curr_date = str(row['trade_date'])[:8]
+                curr_adj = float(row['adj_factor'])
 
-                # 查除权日前后复权因子
-                ex_idx = adj_rows[adj_rows['trade_date'] == ex_date_str].index
-                if len(ex_idx) == 0:
-                    continue
-                ex_pos = adj_rows.index.get_loc(ex_idx[0])
-                if ex_pos == 0:
-                    continue
-                prev_adj = float(adj_rows.iloc[ex_pos - 1]['adj_factor'])
-                curr_adj = float(adj_rows.iloc[ex_pos]['adj_factor'])
-                dr = curr_adj / prev_adj if prev_adj > 0 else 1.0
+                if prev_adj is not None and abs(curr_adj - prev_adj) > 0.0001:
+                    # adj_factor 发生变动 → 除权事件
+                    dr = curr_adj / prev_adj if prev_adj > 0 else 1.0
+                    # 变动日 = 当前行日期（除权除息日）
+                    ex_date_str = curr_date
 
-                # 检查是否已经处理过（避免重复）
-                already = self._store._get_conn().execute(
-                    "SELECT COUNT(*) FROM dividend_log WHERE stockcode=? AND ex_date=?",
-                    (code, ex_date_str)
-                ).fetchone()[0]
-                if already:
-                    continue
+                    if ex_date_str <= first_buy:
+                        prev_adj = curr_adj; prev_date = curr_date
+                        continue
 
-                events.append({
-                    'stockcode': code,
-                    'ex_date': ex_date_str,
-                    'dr': dr,
-                    'cash_div_per_share': float(div.get('cash_div_tax', 0) or 0),
-                    'stk_div_ratio': float(div.get('stk_div', 0) or 0),
-                    'shares_before': qty,
-                    'cost_before': float(pos.get('avg_cost', 0)),
-                    'prev_adj': prev_adj,
-                    'curr_adj': curr_adj,
-                })
+                    # 查是否已处理
+                    already = self._store._get_conn().execute(
+                        "SELECT COUNT(*) FROM dividend_log WHERE stockcode=? AND ex_date=?",
+                        (code, ex_date_str)
+                    ).fetchone()[0]
+                    if already:
+                        prev_adj = curr_adj; prev_date = curr_date
+                        continue
+
+                    # 从 dividend_detail 补充信息（可选）
+                    cash_per_share = 0.0
+                    stk_ratio = 0.0
+                    if self._div_df is not None and not self._div_df.empty:
+                        div_match = self._div_df[
+                            (self._div_df['ts_code'] == code) &
+                            (self._div_df['ex_date'].notna())
+                        ]
+                        if not div_match.empty:
+                            div_match['ex_str'] = div_match['ex_date'].astype(str).str[:10].str.replace('-', '')[:8]
+                            row_match = div_match[div_match['ex_str'] == ex_date_str]
+                            if not row_match.empty:
+                                r = row_match.iloc[0]
+                                cash_per_share = float(r.get('cash_div_tax', 0) or 0)
+                                stk_ratio = float(r.get('stk_div', 0) or 0)
+
+                    events.append({
+                        'stockcode': code, 'ex_date': ex_date_str,
+                        'dr': dr, 'cash_div_per_share': cash_per_share,
+                        'stk_div_ratio': stk_ratio,
+                        'shares_before': qty,
+                        'cost_before': float(pos.get('avg_cost', 0)),
+                        'prev_adj': prev_adj, 'curr_adj': curr_adj,
+                    })
+
+                prev_adj = curr_adj
+                prev_date = curr_date
 
         return sorted(events, key=lambda e: e['ex_date'])
 
