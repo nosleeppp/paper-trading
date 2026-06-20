@@ -34,26 +34,45 @@ class _DataSource:
 
     def read(self) -> pd.DataFrame:
         if self.source == 'parquet':
-            if not self.parquet_path or not os.path.exists(self.parquet_path):
-                raise FileNotFoundError(f"parquet 文件不存在: {self.parquet_path}")
+            if not self.parquet_path:
+                raise FileNotFoundError(
+                    "adj_factor/dividend_detail 的 parquet_path 未配置。\n"
+                    "请在 config.json → dividend → adj_factor (或 dividend_detail) 中设置:\n"
+                    '  "source": "parquet", "parquet_path": "/实际路径/xxx.parquet"\n'
+                    '或切换为 MySQL:\n'
+                    '  "source": "mysql", "mysql": {"host":"...","user":"...","password":"...","database":"...","table":"..."}'
+                )
+            if not os.path.exists(self.parquet_path):
+                raise FileNotFoundError(
+                    f"parquet 文件不存在: {self.parquet_path}\n"
+                    f"请在 config.json → dividend → adj_factor (或 dividend_detail) 中修正 parquet_path,\n"
+                    f"或切换为 MySQL 数据源 (source: mysql)。"
+                )
             return pd.read_parquet(self.parquet_path)
 
         elif self.source == 'mysql':
             mc = self.mysql_config
+            required = ['host', 'user', 'password', 'database', 'table']
+            missing = [k for k in required if not mc.get(k)]
+            if missing:
+                raise ValueError(
+                    f"MySQL 连接信息不完整，缺少: {missing}。\n"
+                    f"请在 config.json → dividend → adj_factor (或 dividend_detail) → mysql 中填写。"
+                )
             try:
                 import pymysql
-                conn = pymysql.connect(
-                    host=mc['host'], port=mc.get('port', 3306),
-                    user=mc['user'], password=mc['password'],
-                    database=mc['database'],
-                )
-                df = pd.read_sql(f"SELECT * FROM {mc['table']}", conn)
-                conn.close()
-                return df
             except ImportError:
-                raise ImportError("pymysql 未安装，无法连接 MySQL。pip install pymysql")
+                raise ImportError("pymysql 未安装。pip install pymysql")
+            conn = pymysql.connect(
+                host=mc['host'], port=mc.get('port', 3306),
+                user=mc['user'], password=mc['password'],
+                database=mc['database'],
+            )
+            df = pd.read_sql(f"SELECT * FROM {mc['table']}", conn)
+            conn.close()
+            return df
 
-        raise ValueError(f"不支持的数据源类型: {self.source}")
+        raise ValueError(f"不支持的数据源类型: {self.source}，请使用 'parquet' 或 'mysql'")
 
 
 # ── 复权调整器 ───────────────────────────────────────────────
