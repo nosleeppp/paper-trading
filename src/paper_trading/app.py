@@ -1047,42 +1047,61 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     bench_provider = SinaDataProvider()
     logger.info("[Realtime] WebSocket+ Sina回退已就绪, %d 只标的", len(_realtime_targets))
 
+    # 加载交易日历
+    _trading_days = set()
+    try:
+        cal_path = os.environ.get('PAPER_TRADE_CALENDAR', '')
+        if cal_path and os.path.exists(cal_path):
+            import pandas as _pd
+            df = _pd.read_parquet(cal_path) if cal_path.endswith('.parquet') else _pd.read_csv(cal_path)
+            for col in ('cal_date', 'trade_date', 'date'):
+                if col in df.columns:
+                    for d in _pd.to_datetime(df[col]).dt.date:
+                        _trading_days.add(d.strftime('%Y%m%d'))
+                    break
+    except Exception:
+        pass
+
+    def _is_td(ds):
+        if not _trading_days:
+            return datetime.strptime(ds, '%Y%m%d').weekday() < 5
+        return ds in _trading_days
+
     last_flush = 0
     last_nav_date = ''
     cycle_count = 0
 
-    # 启动时立即追加当日净值（如果 nav_series 还没有今天的记录）
+    # 启动时立即追加当日净值（仅交易日）
     today_str = datetime.now().strftime('%Y%m%d')
-    try:
-        existing = _realtime_store._get_conn().execute(
-            "SELECT COUNT(*) FROM nav_series WHERE date=?", (today_str,)
-        ).fetchone()
-        if not existing or existing[0] == 0:
-            # 用当前 paper_state 计算
-            pos_list = _paper_state.get('positions', [])
-            total_mv = sum(p.get('market_value', 0) for p in pos_list)
-            cash = _paper_state['account'].get('capital', 0)
-            init_cap = _paper_state['account'].get('initial_capital', cash + total_mv)
-            tv = cash + total_mv
-            nav = tv / init_cap if init_cap > 0 else 1.0
-            _realtime_store.append_nav({
-                'date': today_str, 'nav': nav,
-                'total_value': tv, 'cash': cash,
-                'position_count': len(pos_list),
-                'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
-            })
-            _realtime_store.append_position_snapshot(today_str, {
-                p['stockcode']: p for p in pos_list
-            })
-            _realtime_store.flush()
-            # 同步更新 Web 面板
-            pnl = _paper_state.get('pnl_curve', [])
-            if not pnl or pnl[-1].get('date') != today_str:
-                pnl.append({'date': today_str, 'nav': nav})
-            _paper_state['pnl_curve'] = pnl
-            logger.info("[Realtime] 启动追加当日净值: %s nav=%.4f", today_str, nav)
-    except Exception as e:
-        logger.warning("[Realtime] 启动净值追加失败: %s", e)
+    if _is_td(today_str):
+        try:
+            existing = _realtime_store._get_conn().execute(
+                "SELECT COUNT(*) FROM nav_series WHERE date=?", (today_str,)
+            ).fetchone()
+            if not existing or existing[0] == 0:
+                pos_list = _paper_state.get('positions', [])
+                total_mv = sum(p.get('market_value', 0) for p in pos_list)
+                cash = _paper_state['account'].get('capital', 0)
+                init_cap = _paper_state['account'].get('initial_capital', cash + total_mv)
+                tv = cash + total_mv
+                nav = tv / init_cap if init_cap > 0 else 1.0
+                _realtime_store.append_nav({
+                    'date': today_str, 'nav': nav,
+                    'total_value': tv, 'cash': cash,
+                    'position_count': len(pos_list),
+                    'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
+                })
+                _realtime_store.append_position_snapshot(today_str, {
+                    p['stockcode']: p for p in pos_list
+                })
+                _realtime_store.flush()
+                pnl = _paper_state.get('pnl_curve', [])
+                if not pnl or pnl[-1].get('date') != today_str:
+                    pnl.append({'date': today_str, 'nav': nav})
+                _paper_state['pnl_curve'] = pnl
+                logger.info("[Realtime] 启动追加当日净值: %s nav=%.4f", today_str, nav)
+        except Exception as e:
+            logger.warning("[Realtime] 启动净值追加失败: %s", e)
 
     while _realtime_running:
         try:
@@ -1131,27 +1150,27 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                     if init_cap > 0:
                         _paper_state['account']['total_return'] = (cash + total_mv - init_cap) / init_cap
 
-                    # 策略净值：盘中实时覆盖当日 nav_series（DB 和内存同步）
+                    # 策略净值：盘中实时覆盖当日 nav_series（仅交易日）
                     now = datetime.now()
                     today_str = now.strftime('%Y%m%d')
-                    tv = cash + total_mv
-                    nav_val = tv / init_cap if init_cap > 0 else 1.0
-                    try:
-                        _realtime_store.append_nav({
-                            'date': today_str, 'nav': nav_val,
-                            'total_value': tv, 'cash': cash,
-                            'position_count': len(positions),
-                            'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
-                        })
-                    except Exception:
-                        pass
-                    # 同步更新内存 pnl_curve
-                    pnl = _paper_state.get('pnl_curve', [])
-                    if pnl and pnl[-1].get('date') == today_str:
-                        pnl[-1]['nav'] = nav_val
-                    else:
-                        pnl.append({'date': today_str, 'nav': nav_val})
-                    _paper_state['pnl_curve'] = pnl
+                    if _is_td(today_str):
+                        tv = cash + total_mv
+                        nav_val = tv / init_cap if init_cap > 0 else 1.0
+                        try:
+                            _realtime_store.append_nav({
+                                'date': today_str, 'nav': nav_val,
+                                'total_value': tv, 'cash': cash,
+                                'position_count': len(positions),
+                                'daily_return': (tv - init_cap) / init_cap if init_cap > 0 else 0,
+                            })
+                        except Exception:
+                            pass
+                        pnl = _paper_state.get('pnl_curve', [])
+                        if pnl and pnl[-1].get('date') == today_str:
+                            pnl[-1]['nav'] = nav_val
+                        else:
+                            pnl.append({'date': today_str, 'nav': nav_val})
+                        _paper_state['pnl_curve'] = pnl
 
                     # 基准净值：盘中实时覆盖当日值
                     if _bench_base_price and _bench_base_price > 0:
@@ -1192,10 +1211,10 @@ def _run_realtime_loop(interval: int, flush_interval: int):
                             if s.get('time', '').startswith(today[:4]) or today in str(s.get('time', ''))
                         ][-240:]
 
-                # 净值追加：启动时或收盘后写入
+                # 净值追加：启动时或收盘后写入（仅交易日）
                 now = datetime.now()
                 today_str = now.strftime('%Y%m%d')
-                if today_str != last_nav_date and (now.hour >= 15 or last_nav_date == ''):
+                if today_str != last_nav_date and (now.hour >= 15 or last_nav_date == '') and _is_td(today_str):
                     try:
                         positions = _paper_state.get('positions', [])
                         total_mv = sum(p.get('market_value', 0) for p in positions)
