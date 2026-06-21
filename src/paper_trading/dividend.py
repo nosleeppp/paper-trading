@@ -153,12 +153,18 @@ class DividendAdjuster:
                         prev_adj = curr_adj; prev_date = curr_date
                         continue
 
-                    # 查是否已处理
+                    # 查是否已处理（dividend_log）
                     already = self._store._get_conn().execute(
                         "SELECT COUNT(*) FROM dividend_log WHERE stockcode=? AND ex_date=?",
                         (code, ex_date_str)
                     ).fetchone()[0]
                     if already:
+                        prev_adj = curr_adj; prev_date = curr_date
+                        continue
+
+                    # 幂等保护：当前成本价已接近调整后值则跳过
+                    expected_new = float(pos.get('avg_cost', 0)) / dr if dr > 0 else 0
+                    if abs(float(pos.get('avg_cost', 0)) - expected_new) < 0.01:
                         prev_adj = curr_adj; prev_date = curr_date
                         continue
 
