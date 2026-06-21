@@ -223,6 +223,7 @@ class DividendAdjuster:
             new_qty = int(qty_before * (1 + stk_ratio))
             conn.execute("UPDATE positions SET quantity=?, available=? WHERE stockcode=?",
                          (new_qty, new_qty, code))
+            conn.commit()
             result['shares_after'] = new_qty
             logger.info("[Dividend] %s 送股: %d → %d 股 (10送%.0f)",
                        code, qty_before, new_qty, stk_ratio * 10)
@@ -232,6 +233,7 @@ class DividendAdjuster:
         # ── 2. 前复权成本价 ──
         new_cost = cost_before / dr if dr > 0 else cost_before
         conn.execute("UPDATE positions SET avg_cost=? WHERE stockcode=?", (new_cost, code))
+        conn.commit()
         result['cost_after'] = new_cost
         logger.info("[Dividend] %s 成本价: %.2f → %.2f (dr=%.4f)", code, cost_before, new_cost, dr)
 
@@ -249,6 +251,7 @@ class DividendAdjuster:
                 'total_return': acc.get('total_return', 0),
                 'position_count': acc.get('position_count', 0),
             })
+            conn.commit()
             result['cash_added'] = cash_added
             logger.info("[Dividend] %s 现金分红: %.2f 元 (%.4f/股 × %d股)",
                        code, cash_added, cash_per_share, qty_before)
@@ -260,6 +263,7 @@ class DividendAdjuster:
             "UPDATE orders SET price=price/?, amount=quantity*price WHERE stockcode=? AND trade_date<?",
             (dr, code, ex_date)
         )
+        conn.commit()
         logger.info("[Dividend] %s 历史成交价已前复权", code)
 
         # ── 5. 持仓快照历史前复权 ──
@@ -267,6 +271,7 @@ class DividendAdjuster:
             "UPDATE position_snapshots SET price=price/?, market_value=quantity*price WHERE stockcode=? AND date<?",
             (dr, code, ex_date)
         )
+        conn.commit()
         logger.info("[Dividend] %s 历史持仓快照已前复权", code)
 
         # ── 6. 日志 ──
@@ -277,7 +282,7 @@ class DividendAdjuster:
             (code, ex_date, cash_per_share, stk_ratio, dr,
              qty_before, cost_before, new_cost, cash_added)
         )
-
         conn.commit()
+
         self._store.flush()
         return result
