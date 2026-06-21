@@ -168,21 +168,29 @@ class DividendAdjuster:
                         prev_adj = curr_adj; prev_date = curr_date
                         continue
 
-                    # 从 dividend_detail 补充信息（可选）
+                    # 从 dividend_detail 按 ann_date 匹配（ex_date 通常为空）
                     cash_per_share = 0.0
                     stk_ratio = 0.0
                     if self._div_df is not None and not self._div_df.empty:
-                        div_match = self._div_df[
-                            (self._div_df['ts_code'] == code) &
-                            (self._div_df['ex_date'].notna())
-                        ]
-                        if not div_match.empty:
-                            div_match['ex_str'] = div_match['ex_date'].astype(str).str[:10].str.replace('-', '')[:8]
-                            row_match = div_match[div_match['ex_str'] == ex_date_str]
-                            if not row_match.empty:
-                                r = row_match.iloc[0]
+                        div_for_code = self._div_df[self._div_df['ts_code'] == code].copy()
+                        if not div_for_code.empty:
+                            # 按 ex_date 精确匹配优先
+                            div_for_code['ex_str'] = div_for_code['ex_date'].astype(str).str[:10].str.replace('-', '')[:8]
+                            exact = div_for_code[div_for_code['ex_str'] == ex_date_str]
+                            if not exact.empty:
+                                r = exact.iloc[0]
                                 cash_per_share = float(r.get('cash_div_tax', 0) or 0)
                                 stk_ratio = float(r.get('stk_div', 0) or 0)
+                            else:
+                                # ex_date 为空时, 用 ann_date 匹配 (公告日在除权日前90天内)
+                                for _, r in div_for_code.iterrows():
+                                    ann = str(r.get('ann_date', ''))[:10].replace('-', '')[:8]
+                                    if ann and abs(int(ex_date_str) - int(ann)) <= 90:
+                                        if float(r.get('cash_div_tax', 0) or 0) > 0:
+                                            cash_per_share = float(r['cash_div_tax'])
+                                        if float(r.get('stk_div', 0) or 0) > 0:
+                                            stk_ratio = float(r['stk_div'])
+                                        break
 
                     events.append({
                         'stockcode': code, 'ex_date': ex_date_str,
