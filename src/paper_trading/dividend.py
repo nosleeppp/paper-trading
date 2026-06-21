@@ -278,5 +278,6 @@ class DividendAdjuster:
              qty_before, cost_before, new_cost, cash_added)
         )
 
+        conn.commit()
         self._store.flush()
         return result
