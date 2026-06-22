@@ -1063,8 +1063,11 @@ def _run_realtime_loop(interval: int, flush_interval: int):
         pass
 
     def _is_td(ds):
+        # 周末永不交易
+        if datetime.strptime(ds, '%Y%m%d').weekday() >= 5:
+            return False
         if not _trading_days:
-            return datetime.strptime(ds, '%Y%m%d').weekday() < 5
+            return True
         return ds in _trading_days
 
     last_flush = 0
