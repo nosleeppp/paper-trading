@@ -1047,13 +1047,15 @@ def _run_realtime_loop(interval: int, flush_interval: int):
     bench_provider = SinaDataProvider()
     logger.info("[Realtime] WebSocket+ Sina回退已就绪, %d 只标的", len(_realtime_targets))
 
-    # 加载交易日历
+    # 加载交易日历（仅 is_open=1 的交易日）
     _trading_days = set()
     try:
         cal_path = os.environ.get('PAPER_TRADE_CALENDAR', '')
         if cal_path and os.path.exists(cal_path):
             import pandas as _pd
             df = _pd.read_parquet(cal_path) if cal_path.endswith('.parquet') else _pd.read_csv(cal_path)
+            if 'is_open' in df.columns:
+                df = df[df['is_open'] == 1]
             for col in ('cal_date', 'trade_date', 'date'):
                 if col in df.columns:
                     for d in _pd.to_datetime(df[col]).dt.date:
@@ -1063,11 +1065,8 @@ def _run_realtime_loop(interval: int, flush_interval: int):
         pass
 
     def _is_td(ds):
-        # 周末永不交易
-        if datetime.strptime(ds, '%Y%m%d').weekday() >= 5:
-            return False
         if not _trading_days:
-            return True
+            return datetime.strptime(ds, '%Y%m%d').weekday() < 5
         return ds in _trading_days
 
     last_flush = 0

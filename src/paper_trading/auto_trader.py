@@ -167,7 +167,9 @@ class AutoTrader:
                 import pandas as pd
                 ext = os.path.splitext(cal_path)[1].lower()
                 df = pd.read_parquet(cal_path) if ext in ('.parquet', '.pq') else pd.read_csv(cal_path)
-                date_col = df.columns[0]
+                if 'is_open' in df.columns:
+                    df = df[df['is_open'] == 1]
+                date_col = next((c for c in ('cal_date', 'trade_date', 'date') if c in df.columns), df.columns[0])
                 all_dates = sorted(pd.to_datetime(df[date_col]).dt.date.unique())
                 return [d for d in all_dates if d.year == year and d.month == month]
             except Exception:
